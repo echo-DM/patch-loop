@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — 拒绝未经授权的 Issue 运行
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [ ] 授权任务通过公开 `run` interface 进入 LangGraph，但调用方不需要知道节点或边的实现细节。
 - [ ] deterministic Model adapter 可以产生结构化的澄清决定和问题列表。

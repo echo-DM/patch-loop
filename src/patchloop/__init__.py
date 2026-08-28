@@ -1,6 +1,10 @@
 """PatchLoop's public execution interface."""
 
-from patchloop.adapters import GitHubIssueAdapter, TaskEvaluator
+from patchloop.adapters import (
+    DeterministicModelAdapter,
+    GitHubIssueAdapter,
+    TaskEvaluator,
+)
 from patchloop.config import RepositoryConfig, load_repository_config
 from patchloop.core import (
     GitHubEventTask,
@@ -14,6 +18,7 @@ from patchloop.core import (
 __all__ = [
     "GitHubEventTask",
     "GitHubIssueAdapter",
+    "DeterministicModelAdapter",
     "RepositoryConfig",
     "RunAdapters",
     "RunRequest",

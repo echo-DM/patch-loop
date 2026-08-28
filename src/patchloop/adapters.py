@@ -35,9 +35,10 @@ class EvaluationTask:
 
 @dataclass(frozen=True)
 class EvaluationDecision:
-    terminal_outcome: Literal["no_change", "failed"]
+    terminal_outcome: Literal["needs_clarification", "no_change", "failed"]
     summary: str
     actionable_message: str
+    clarification_questions: tuple[str, ...] = ()
     errors: tuple[dict[str, str], ...] = ()
 
 
@@ -48,6 +49,39 @@ class TaskEvaluator(Protocol):
         repository: Path,
         config: RepositoryConfig,
     ) -> EvaluationDecision: ...
+
+
+class DeterministicModelAdapter:
+    """Return fixture decisions by task id without network or model credentials."""
+
+    def __init__(self, decisions: Mapping[str, EvaluationDecision]) -> None:
+        self._decisions = dict(decisions)
+        self.tasks: list[EvaluationTask] = []
+
+    def evaluate(
+        self,
+        task: EvaluationTask,
+        repository: Path,
+        config: RepositoryConfig,
+    ) -> EvaluationDecision:
+        _ = repository, config
+        self.tasks.append(task)
+        try:
+            return self._decisions[task.id]
+        except KeyError:
+            message = f"No deterministic model decision is configured for task {task.id}."
+            return EvaluationDecision(
+                terminal_outcome="failed",
+                summary="The deterministic model could not evaluate this task.",
+                actionable_message="Configure a fixture decision for this task.",
+                errors=(
+                    {
+                        "category": "model",
+                        "code": "decision_not_configured",
+                        "message": message,
+                    },
+                ),
+            )
 
 
 class GitHubClient(Protocol):

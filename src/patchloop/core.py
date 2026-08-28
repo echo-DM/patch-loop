@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping, TypedDict
+from typing import Literal, Mapping, NotRequired, TypedDict
 
 from patchloop.adapters import (
     EvaluationDecision,
@@ -13,7 +13,12 @@ from patchloop.adapters import (
 )
 from patchloop.config import RepositoryConfig
 from patchloop.errors import InfrastructureError
+from patchloop.graph import evaluate_task
 from patchloop.sanitize import redact_text
+
+
+MAX_CLARIFICATION_QUESTIONS = 3
+MAX_CLARIFICATION_QUESTION_CHARS = 240
 
 
 class VerificationReport(TypedDict):
@@ -49,9 +54,18 @@ class BudgetsReport(TypedDict):
     resource_limit_events: list[object]
 
 
-class PublicationIntent(TypedDict):
+class NoPublicationIntent(TypedDict):
     intent: Literal["none"]
     reason: Literal["no_change", "failed"]
+
+
+class IssueFeedbackIntent(TypedDict):
+    intent: Literal["issue_feedback"]
+    reason: Literal["needs_clarification"]
+    questions: list[str]
+
+
+PublicationIntent = NoPublicationIntent | IssueFeedbackIntent
 
 
 class ReportError(TypedDict):
@@ -63,7 +77,7 @@ class ReportError(TypedDict):
 class RunReport(TypedDict):
     report_version: Literal["1"]
     task_id: str
-    terminal_outcome: Literal["no_change", "failed"]
+    terminal_outcome: Literal["needs_clarification", "no_change", "failed"]
     summary: str
     actionable_message: str
     patch: None
@@ -72,6 +86,7 @@ class RunReport(TypedDict):
     budgets: BudgetsReport
     publication: PublicationIntent
     errors: list[ReportError]
+    clarification_questions: NotRequired[list[str]]
 
 
 @dataclass(frozen=True)
@@ -102,11 +117,12 @@ class RunRequest:
 
 @dataclass(frozen=True)
 class RunResult:
-    terminal_outcome: Literal["no_change", "failed"]
+    terminal_outcome: Literal["needs_clarification", "no_change", "failed"]
     patch: None
     verification: VerificationReport
     report: RunReport
     publication: PublicationIntent
+    clarification_questions: tuple[str, ...] = ()
 
 
 def validate_repository_workspace(repository: Path) -> None:
@@ -155,10 +171,27 @@ def run(request: RunRequest) -> RunResult:
         task_id = task.id
     if decision is None:
         assert task is not None
-        decision = request.adapters.evaluator.evaluate(
+        decision = evaluate_task(
             task,
             request.repository,
             request.config,
+            request.adapters.evaluator,
+        )
+    questions = _sanitize_clarification_questions(decision)
+    if decision.terminal_outcome == "needs_clarification" and not questions:
+        decision = EvaluationDecision(
+            terminal_outcome="failed",
+            summary="The model returned an invalid clarification decision.",
+            actionable_message=(
+                "Retry the run after the model can provide at least one concrete question."
+            ),
+            errors=(
+                {
+                    "category": "model",
+                    "code": "invalid_clarification_decision",
+                    "message": "A clarification decision must contain a non-empty question.",
+                },
+            ),
         )
     verification: VerificationReport = {
         "status": "not_run",
@@ -167,15 +200,23 @@ def run(request: RunRequest) -> RunResult:
         ],
         "checks": [],
     }
-    publication: PublicationIntent = {
-        "intent": "none",
-        "reason": decision.terminal_outcome,
-    }
+    publication: PublicationIntent
+    if decision.terminal_outcome == "needs_clarification":
+        publication = {
+            "intent": "issue_feedback",
+            "reason": "needs_clarification",
+            "questions": list(questions),
+        }
+    else:
+        publication = {
+            "intent": "none",
+            "reason": decision.terminal_outcome,
+        }
     errors: list[ReportError] = [
         {
             "category": error["category"],
             "code": error["code"],
-            "message": error["message"],
+            "message": redact_text(error["message"]),
         }
         for error in decision.errors
     ]
@@ -201,8 +242,8 @@ def run(request: RunRequest) -> RunResult:
         "report_version": "1",
         "task_id": task_id,
         "terminal_outcome": decision.terminal_outcome,
-        "summary": decision.summary,
-        "actionable_message": decision.actionable_message,
+        "summary": redact_text(decision.summary),
+        "actionable_message": redact_text(decision.actionable_message),
         "patch": None,
         "changed_files": changed_files,
         "verification": verification,
@@ -210,10 +251,29 @@ def run(request: RunRequest) -> RunResult:
         "publication": publication,
         "errors": errors,
     }
+    if decision.terminal_outcome == "needs_clarification":
+        report["clarification_questions"] = list(questions)
     return RunResult(
         terminal_outcome=decision.terminal_outcome,
         patch=None,
         verification=verification,
         report=report,
         publication=publication,
+        clarification_questions=questions,
     )
+
+
+def _sanitize_clarification_questions(
+    decision: EvaluationDecision,
+) -> tuple[str, ...]:
+    if decision.terminal_outcome != "needs_clarification":
+        return ()
+    questions: list[str] = []
+    for raw_question in decision.clarification_questions:
+        question = redact_text(" ".join(raw_question.split())).strip()
+        if not question:
+            continue
+        questions.append(question[:MAX_CLARIFICATION_QUESTION_CHARS])
+        if len(questions) == MAX_CLARIFICATION_QUESTIONS:
+            break
+    return tuple(questions)
