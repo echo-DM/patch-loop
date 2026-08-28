@@ -6,12 +6,7 @@ from typing import cast
 
 import yaml
 
-
-class ConfigError(Exception):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
+from patchloop.errors import ConfigError, InfrastructureError
 
 
 @dataclass(frozen=True)
@@ -107,6 +102,10 @@ def load_repository_config(path: Path) -> RepositoryConfig:
     except yaml.YAMLError as error:
         raise ConfigError(
             "invalid_yaml", f"Repository configuration is not valid YAML: {error}."
+        ) from error
+    except OSError as error:
+        raise InfrastructureError(
+            "config_unreadable", "Repository configuration could not be read."
         ) from error
 
     version = _required(document, "version")

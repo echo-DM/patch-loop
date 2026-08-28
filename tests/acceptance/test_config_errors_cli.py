@@ -1,33 +1,18 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
-from pathlib import Path
+
+from conftest import CliHarness
 
 
-FIXTURES = Path(__file__).parents[1] / "fixtures"
-
-
-def test_unknown_config_version_is_a_configuration_error(tmp_path: Path) -> None:
-    repository = tmp_path / "repository"
-    shutil.copytree(FIXTURES / "no_change_repository", repository)
+def test_unknown_config_version_is_a_configuration_error(
+    cli_harness: CliHarness,
+) -> None:
+    repository = cli_harness.copy_repository()
     config = repository / ".patchloop.yml"
     config.write_text(config.read_text().replace("version: 1", "version: 2"))
 
-    completed = subprocess.run(
-        [
-            "patchloop",
-            "run",
-            "--task",
-            str(FIXTURES / "no_change_task.json"),
-            "--repository",
-            str(repository),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = cli_harness.run(repository)
 
     assert completed.returncode == 2
     assert completed.stdout == ""
@@ -40,25 +25,12 @@ def test_unknown_config_version_is_a_configuration_error(tmp_path: Path) -> None
     }
 
 
-def test_missing_required_config_field_is_named(tmp_path: Path) -> None:
-    repository = tmp_path / "repository"
-    shutil.copytree(FIXTURES / "no_change_repository", repository)
+def test_missing_required_config_field_is_named(cli_harness: CliHarness) -> None:
+    repository = cli_harness.copy_repository()
     config = repository / ".patchloop.yml"
     config.write_text(config.read_text().replace("model: gemini-2.5-flash\n", ""))
 
-    completed = subprocess.run(
-        [
-            "patchloop",
-            "run",
-            "--task",
-            str(FIXTURES / "no_change_task.json"),
-            "--repository",
-            str(repository),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = cli_harness.run(repository)
 
     assert completed.returncode == 2
     assert completed.stdout == ""
@@ -71,25 +43,12 @@ def test_missing_required_config_field_is_named(tmp_path: Path) -> None:
     }
 
 
-def test_budget_above_safety_ceiling_is_rejected(tmp_path: Path) -> None:
-    repository = tmp_path / "repository"
-    shutil.copytree(FIXTURES / "no_change_repository", repository)
+def test_budget_above_safety_ceiling_is_rejected(cli_harness: CliHarness) -> None:
+    repository = cli_harness.copy_repository()
     config = repository / ".patchloop.yml"
     config.write_text(config.read_text().replace("max_tool_calls: 60", "max_tool_calls: 61"))
 
-    completed = subprocess.run(
-        [
-            "patchloop",
-            "run",
-            "--task",
-            str(FIXTURES / "no_change_task.json"),
-            "--repository",
-            str(repository),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    completed = cli_harness.run(repository)
 
     assert completed.returncode == 2
     assert completed.stdout == ""
