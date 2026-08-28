@@ -1,0 +1,14 @@
+version: 1
+model: gemini-2.5-flash
+verifier:
+  image: python:3.12-slim
+  setup:
+    - uv sync --frozen
+  checks:
+    - uv run pytest
+budgets:
+  max_iterations: 3
+  max_tool_calls: 60
+  max_changed_files: 20
+  max_diff_lines: 2000
+  max_wall_time_minutes: 30
