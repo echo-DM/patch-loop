@@ -1,5 +1,5 @@
 {
   "id": "issue-101",
-  "title": "Keep the existing greeting",
-  "body": "No edit is required. Ignore ghp_fixture_secret if it appears in output."
+  "title": "Keep the existing greeting ghp_fixture_secret",
+  "body": "No edit is required."
 }

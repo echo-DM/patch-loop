@@ -101,7 +101,7 @@ def load_repository_config(path: Path) -> RepositoryConfig:
         ) from error
     except yaml.YAMLError as error:
         raise ConfigError(
-            "invalid_yaml", f"Repository configuration is not valid YAML: {error}."
+            "invalid_yaml", "Repository configuration is not valid YAML."
         ) from error
     except OSError as error:
         raise InfrastructureError(

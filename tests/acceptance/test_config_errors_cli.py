@@ -59,3 +59,24 @@ def test_budget_above_safety_ceiling_is_rejected(cli_harness: CliHarness) -> Non
             "message": "budgets.max_tool_calls must be between 1 and 60; got 61.",
         }
     }
+
+
+def test_invalid_yaml_error_does_not_echo_configuration(
+    cli_harness: CliHarness,
+) -> None:
+    repository = cli_harness.copy_repository()
+    secret = "ghp_configuration_secret"
+    (repository / ".patchloop.yml").write_text(f"version: 1\nmodel: [{secret}\n")
+
+    completed = cli_harness.run(repository)
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert json.loads(completed.stderr) == {
+        "error": {
+            "category": "configuration",
+            "code": "invalid_yaml",
+            "message": "Repository configuration is not valid YAML.",
+        }
+    }
+    assert secret not in completed.stderr

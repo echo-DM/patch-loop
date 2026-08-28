@@ -34,7 +34,9 @@ class TaskEvaluator(Protocol):
 class ExplicitNoChangeEvaluator:
     """Deterministic Ticket 01 adapter for explicitly no-change fixture tasks."""
 
-    _MARKERS = ("no edit is required", "no change is required")
+    _DECLARATIONS = frozenset(
+        {"no edit is required.", "no change is required."}
+    )
 
     def evaluate(
         self,
@@ -43,7 +45,8 @@ class ExplicitNoChangeEvaluator:
         config: RepositoryConfig,
     ) -> EvaluationDecision:
         _ = repository, config
-        if any(marker in task.body.casefold() for marker in self._MARKERS):
+        declaration = " ".join(task.body.split()).casefold()
+        if declaration in self._DECLARATIONS:
             return EvaluationDecision(
                 terminal_outcome="no_change",
                 summary="The task explicitly states that no repository change is required.",

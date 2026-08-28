@@ -8,7 +8,13 @@ from typing import Sequence, cast
 
 from patchloop.adapters import ExplicitNoChangeEvaluator
 from patchloop.config import load_repository_config
-from patchloop.core import RunAdapters, RunRequest, TaskSnapshot, run
+from patchloop.core import (
+    RunAdapters,
+    RunRequest,
+    TaskSnapshot,
+    run,
+    validate_repository_workspace,
+)
 from patchloop.errors import ConfigError, InfrastructureError, TaskError
 
 
@@ -53,11 +59,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     repository = cast(Path, arguments.repository)
     try:
-        if not repository.is_dir():
-            raise InfrastructureError(
-                "invalid_repository",
-                f"Repository workspace is not a directory: {repository}.",
-            )
+        validate_repository_workspace(repository)
         result = run(
             RunRequest(
                 task=load_task(cast(Path, arguments.task)),

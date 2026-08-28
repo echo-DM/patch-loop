@@ -47,6 +47,25 @@ def test_change_request_is_not_falsely_reported_as_no_change(
     ]
 
 
+def test_conflicting_no_change_statement_is_not_accepted(
+    cli_harness: CliHarness,
+) -> None:
+    repository = cli_harness.copy_repository()
+    task = cli_harness.write_task(
+        {
+            "id": "issue-103",
+            "title": "Change the greeting",
+            "body": "No edit is required is false; edit README.",
+        },
+        "conflicting-task.json",
+    )
+
+    completed = cli_harness.run(repository, task)
+
+    assert completed.returncode == 1
+    assert json.loads(completed.stdout)["terminal_outcome"] == "failed"
+
+
 def test_unavailable_repository_uses_infrastructure_exit_status(
     cli_harness: CliHarness,
 ) -> None:

@@ -20,4 +20,4 @@ Implemented the first installable `patchloop run` slice with a versioned configu
 
 ## Comments
 
-- 2026-08-28: Validated with `uv lock --check`, strict `mypy`, the full offline pytest suite (7 tests), a wheel/sdist build, and `git diff --check`. Post-implementation review added an explicit evaluator adapter, honest failure for tasks that may need edits, structured infrastructure errors, and a shared CLI fixture harness.
+- 2026-08-28: Validated with `uv lock --check`, strict `mypy`, the full offline pytest suite (9 tests), a wheel/sdist build, and `git diff --check`. Post-implementation review added an explicit evaluator adapter, exact no-change declarations, honest failure for tasks that may need edits, structured infrastructure errors, a complete version-1 report skeleton, sanitized YAML errors, and a shared CLI fixture harness.
