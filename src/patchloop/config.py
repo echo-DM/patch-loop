@@ -85,9 +85,14 @@ def _budget(document: dict[str, object], field: str) -> int:
     value = _required(document, field, f"budgets.{field}")
     ceiling = SAFETY_CEILINGS[field]
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= ceiling:
+        received = (
+            f"got {value}"
+            if isinstance(value, int) and not isinstance(value, bool)
+            else "got an invalid value"
+        )
         raise ConfigError(
             "unsafe_budget_value",
-            f"budgets.{field} must be between 1 and {ceiling}; got {value}.",
+            f"budgets.{field} must be between 1 and {ceiling}; {received}.",
         )
     return value
 
@@ -110,9 +115,14 @@ def load_repository_config(path: Path) -> RepositoryConfig:
 
     version = _required(document, "version")
     if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+        received = (
+            f" {version}"
+            if isinstance(version, int) and not isinstance(version, bool)
+            else ""
+        )
         raise ConfigError(
             "unsupported_config_version",
-            f"Unsupported configuration version {version}; expected 1.",
+            f"Unsupported configuration version{received}; expected 1.",
         )
 
     verifier_document = _mapping(_required(document, "verifier"), "verifier")

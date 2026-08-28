@@ -7,6 +7,7 @@ from typing import Literal, TypedDict
 from patchloop.adapters import EvaluationTask, TaskEvaluator
 from patchloop.config import RepositoryConfig
 from patchloop.errors import InfrastructureError
+from patchloop.sanitize import redact_text
 
 
 class VerificationReport(TypedDict):
@@ -118,7 +119,9 @@ def run(request: RunRequest) -> RunResult:
     )
     verification: VerificationReport = {
         "status": "not_run",
-        "configured_checks": list(request.config.verifier.checks),
+        "configured_checks": [
+            redact_text(command) for command in request.config.verifier.checks
+        ],
         "checks": [],
     }
     publication: PublicationIntent = {

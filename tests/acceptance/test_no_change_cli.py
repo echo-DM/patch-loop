@@ -44,3 +44,20 @@ def test_no_change_task_returns_sanitized_report(cli_harness: CliHarness) -> Non
         "errors": [],
     }
     assert "ghp_fixture_secret" not in completed.stdout
+
+
+def test_report_redacts_credentials_from_configured_checks(
+    cli_harness: CliHarness,
+) -> None:
+    repository = cli_harness.copy_repository()
+    secret = "ghp_valid_configuration_secret"
+    config = repository / ".patchloop.yml"
+    config.write_text(config.read_text().replace("uv run pytest", f"echo {secret}"))
+
+    completed = cli_harness.run(repository)
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["verification"]["configured_checks"] == [
+        "echo [REDACTED]"
+    ]
+    assert secret not in completed.stdout
