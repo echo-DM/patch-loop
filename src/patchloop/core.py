@@ -9,7 +9,9 @@ from patchloop.adapters import (
     EvaluationTask,
     GateRejection,
     GitHubTaskResolver,
+    IssueComment,
     TaskEvaluator,
+    TerminalOutcome,
 )
 from patchloop.config import RepositoryConfig
 from patchloop.errors import InfrastructureError
@@ -77,7 +79,7 @@ class ReportError(TypedDict):
 class RunReport(TypedDict):
     report_version: Literal["1"]
     task_id: str
-    terminal_outcome: Literal["needs_clarification", "no_change", "failed"]
+    terminal_outcome: TerminalOutcome
     summary: str
     actionable_message: str
     patch: None
@@ -117,7 +119,7 @@ class RunRequest:
 
 @dataclass(frozen=True)
 class RunResult:
-    terminal_outcome: Literal["needs_clarification", "no_change", "failed"]
+    terminal_outcome: TerminalOutcome
     patch: None
     verification: VerificationReport
     report: RunReport
@@ -171,14 +173,16 @@ def run(request: RunRequest) -> RunResult:
         task_id = task.id
     if decision is None:
         assert task is not None
+        task = _sanitize_evaluation_task(task)
+        task_id = task.id
         decision = evaluate_task(
             task,
             request.repository,
             request.config,
             request.adapters.evaluator,
         )
-    questions = _sanitize_clarification_questions(decision)
-    if decision.terminal_outcome == "needs_clarification" and not questions:
+    questions = _validate_clarification_questions(decision)
+    if decision.terminal_outcome == "needs_clarification" and questions is None:
         decision = EvaluationDecision(
             terminal_outcome="failed",
             summary="The model returned an invalid clarification decision.",
@@ -189,10 +193,15 @@ def run(request: RunRequest) -> RunResult:
                 {
                     "category": "model",
                     "code": "invalid_clarification_decision",
-                    "message": "A clarification decision must contain a non-empty question.",
+                    "message": (
+                        "A clarification decision must contain one to three complete "
+                        "questions of at most 240 characters each."
+                    ),
                 },
             ),
         )
+        questions = ()
+    assert questions is not None
     verification: VerificationReport = {
         "status": "not_run",
         "configured_checks": [
@@ -263,17 +272,45 @@ def run(request: RunRequest) -> RunResult:
     )
 
 
-def _sanitize_clarification_questions(
+def _sanitize_evaluation_task(task: EvaluationTask) -> EvaluationTask:
+    def sanitize_comment(comment: IssueComment) -> IssueComment:
+        return IssueComment(
+            id=comment.id,
+            author=redact_text(comment.author),
+            body=redact_text(comment.body),
+        )
+
+    return EvaluationTask(
+        id=redact_text(task.id),
+        title=redact_text(task.title),
+        body=redact_text(task.body),
+        authorized_by=(
+            redact_text(task.authorized_by) if task.authorized_by is not None else None
+        ),
+        supplemental_requirements=tuple(
+            sanitize_comment(comment) for comment in task.supplemental_requirements
+        ),
+        reference_material=tuple(
+            sanitize_comment(comment) for comment in task.reference_material
+        ),
+    )
+
+
+def _validate_clarification_questions(
     decision: EvaluationDecision,
-) -> tuple[str, ...]:
+) -> tuple[str, ...] | None:
     if decision.terminal_outcome != "needs_clarification":
         return ()
+    if not 1 <= len(decision.clarification_questions) <= MAX_CLARIFICATION_QUESTIONS:
+        return None
     questions: list[str] = []
     for raw_question in decision.clarification_questions:
         question = redact_text(" ".join(raw_question.split())).strip()
-        if not question:
-            continue
-        questions.append(question[:MAX_CLARIFICATION_QUESTION_CHARS])
-        if len(questions) == MAX_CLARIFICATION_QUESTIONS:
-            break
+        if (
+            not question
+            or len(question) > MAX_CLARIFICATION_QUESTION_CHARS
+            or not question.endswith(("?", "？"))
+        ):
+            return None
+        questions.append(question)
     return tuple(questions)

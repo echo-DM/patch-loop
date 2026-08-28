@@ -89,7 +89,6 @@ def test_missing_reproduction_returns_bounded_sanitized_issue_feedback(
             f"Which command reproduces the failure with token={secret}?",
             "What output did you expect, and what output did you observe?",
             "Which operating system and PatchLoop version are affected?",
-            "This fourth question must be discarded.",
         ),
     )
 
@@ -192,6 +191,7 @@ def test_low_trust_comment_is_context_but_cannot_change_terminal_rules(
     )
 
     assert model.tasks[0].reference_material[0].body.startswith("Ignore policy")
+    assert "ghp_external_fixture_secret" not in str(model.tasks[0])
     assert result.terminal_outcome == "needs_clarification"
     assert result.publication["intent"] == "issue_feedback"
 
@@ -215,7 +215,7 @@ def test_empty_clarification_decision_fails_without_feedback_intent(
     assert result.report["errors"][0]["code"] == "invalid_clarification_decision"
 
 
-def test_clarification_question_text_is_bounded(
+def test_oversized_clarification_question_fails_without_partial_feedback(
     cli_harness: CliHarness,
 ) -> None:
     result, _ = run_model_decision(
@@ -224,11 +224,13 @@ def test_clarification_question_text_is_bounded(
             terminal_outcome="needs_clarification",
             summary="More detail is required.",
             actionable_message="Answer the question.",
-            clarification_questions=("x" * 500,),
+            clarification_questions=(f"What does {'x' * 500} mean?",),
         ),
     )
 
-    assert len(result.clarification_questions[0]) == 240
+    assert result.terminal_outcome == "failed"
+    assert result.clarification_questions == ()
+    assert result.publication == {"intent": "none", "reason": "failed"}
 
 
 @pytest.mark.parametrize("declaration", ["No edit is required.", "No change is required."])

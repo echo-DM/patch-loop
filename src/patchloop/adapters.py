@@ -9,6 +9,7 @@ from patchloop.config import RepositoryConfig
 
 
 RepositoryPermission = Literal["admin", "write", "read", "none"]
+TerminalOutcome = Literal["needs_clarification", "no_change", "failed"]
 WRITE_PERMISSIONS: frozenset[RepositoryPermission] = frozenset({"admin", "write"})
 
 
@@ -35,7 +36,7 @@ class EvaluationTask:
 
 @dataclass(frozen=True)
 class EvaluationDecision:
-    terminal_outcome: Literal["needs_clarification", "no_change", "failed"]
+    terminal_outcome: TerminalOutcome
     summary: str
     actionable_message: str
     clarification_questions: tuple[str, ...] = ()
