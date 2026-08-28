@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Mapping, Protocol, Sequence, cast
 
 from patchloop.config import RepositoryConfig
+
+
+RepositoryPermission = Literal["admin", "write", "read", "none"]
+WRITE_PERMISSIONS: frozenset[RepositoryPermission] = frozenset({"admin", "write"})
+
+
+def has_write_access(permission: RepositoryPermission | None) -> bool:
+    return permission in WRITE_PERMISSIONS
 
 
 @dataclass(frozen=True)
@@ -42,7 +51,9 @@ class TaskEvaluator(Protocol):
 
 
 class GitHubClient(Protocol):
-    def permission_for(self, repository: str, username: str) -> str | None: ...
+    def permission_for(
+        self, repository: str, username: str
+    ) -> RepositoryPermission | None: ...
 
     def issue_comments(
         self, repository: str, issue_number: int
@@ -50,20 +61,16 @@ class GitHubClient(Protocol):
 
 
 @dataclass(frozen=True)
-class NormalizedGitHubTask:
-    id: str
-    title: str
-    body: str
-    authorized_by: str
-    supplemental_requirements: tuple[IssueComment, ...]
-    reference_material: tuple[IssueComment, ...]
-
-
-@dataclass(frozen=True)
 class GateRejection:
     task_id: str
     code: str
     message: str
+
+
+class GitHubTaskResolver(Protocol):
+    def resolve(
+        self, event: Mapping[str, object]
+    ) -> EvaluationTask | GateRejection: ...
 
 
 class GitHubIssueAdapter:
@@ -75,7 +82,7 @@ class GitHubIssueAdapter:
 
     def resolve(
         self, event: Mapping[str, object]
-    ) -> NormalizedGitHubTask | GateRejection:
+    ) -> EvaluationTask | GateRejection:
         label = event.get("label")
         if (
             event.get("action") != "labeled"
@@ -97,12 +104,15 @@ class GitHubIssueAdapter:
         issue_number = issue["number"]
         title = issue["title"]
         body = issue["body"]
+        updated_at = issue["updated_at"]
         if (
             not isinstance(issue_number, int)
             or not isinstance(title, str)
             or not isinstance(body, str)
+            or not isinstance(updated_at, str)
         ):
-            raise ValueError("GitHub issue number, title, and body are invalid.")
+            raise ValueError("GitHub issue snapshot fields are invalid.")
+        snapshot_cutoff = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
         try:
             permission = self._client.permission_for(repository, sender)
         except Exception:
@@ -111,7 +121,7 @@ class GitHubIssueAdapter:
                 code="permission_lookup_failed",
                 message=f"Could not verify actor {sender}'s repository permission.",
             )
-        if permission is not None and permission not in {"write", "admin"}:
+        if permission is not None and not has_write_access(permission):
             return GateRejection(
                 task_id=f"github:{repository}#{issue_number}",
                 code="insufficient_permission",
@@ -130,6 +140,15 @@ class GitHubIssueAdapter:
         supplemental: list[IssueComment] = []
         references: list[IssueComment] = []
         for document in self._client.issue_comments(repository, issue_number):
+            created_at = document["created_at"]
+            comment_updated_at = document["updated_at"]
+            if not isinstance(created_at, str) or not isinstance(comment_updated_at, str):
+                raise ValueError("GitHub issue comment timestamps are invalid.")
+            if max(
+                datetime.fromisoformat(created_at.replace("Z", "+00:00")),
+                datetime.fromisoformat(comment_updated_at.replace("Z", "+00:00")),
+            ) > snapshot_cutoff:
+                continue
             author = cast(dict[str, object], document["user"])["login"]
             comment_id = document["id"]
             comment_body = document["body"]
@@ -146,12 +165,12 @@ class GitHubIssueAdapter:
                 author_permission = None
             target = (
                 supplemental
-                if author_permission in {"write", "admin"}
+                if has_write_access(author_permission)
                 else references
             )
             target.append(comment)
 
-        return NormalizedGitHubTask(
+        return EvaluationTask(
             id=f"github:{repository}#{issue_number}",
             title=title,
             body=body,

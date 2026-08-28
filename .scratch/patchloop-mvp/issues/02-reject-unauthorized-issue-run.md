@@ -21,4 +21,4 @@ Implemented a GitHub Issue gate at the public `run` boundary. It recognizes only
 
 ## Comments
 
-- 2026-08-28: Validated write/admin authorization, non-trigger events, lower permissions, unknown actors, permission lookup failures, immutable snapshots, and hostile external comments with fixed GitHub fixtures. `uv lock --check`, strict `mypy`, the full offline pytest suite (17 tests), package build, and `git diff --check` all pass.
+- 2026-08-28: Validated write/admin authorization, non-trigger events, lower permissions, unknown actors, permission lookup failures, immutable snapshots, and hostile external comments with fixed GitHub fixtures. Post-implementation review added the label-event timestamp cutoff so comments created or edited after authorization cannot enter the frozen task. `uv lock --check`, strict `mypy`, the full offline pytest suite (17 tests), package build, and `git diff --check` all pass.

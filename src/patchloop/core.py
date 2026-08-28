@@ -8,7 +8,7 @@ from patchloop.adapters import (
     EvaluationDecision,
     EvaluationTask,
     GateRejection,
-    GitHubIssueAdapter,
+    GitHubTaskResolver,
     TaskEvaluator,
 )
 from patchloop.config import RepositoryConfig
@@ -89,7 +89,7 @@ class GitHubEventTask:
 @dataclass(frozen=True)
 class RunAdapters:
     evaluator: TaskEvaluator
-    github: GitHubIssueAdapter | None = None
+    github: GitHubTaskResolver | None = None
 
 
 @dataclass(frozen=True)
@@ -144,14 +144,7 @@ def run(request: RunRequest) -> RunResult:
                 ),
             )
         else:
-            task = EvaluationTask(
-                id=resolution.id,
-                title=resolution.title,
-                body=resolution.body,
-                authorized_by=resolution.authorized_by,
-                supplemental_requirements=resolution.supplemental_requirements,
-                reference_material=resolution.reference_material,
-            )
+            task = resolution
             task_id = task.id
     else:
         task = EvaluationTask(

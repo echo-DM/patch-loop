@@ -6,6 +6,7 @@
   "issue": {
     "number": 42,
     "title": "Keep the greeting",
-    "body": "No change is required."
+    "body": "No change is required.",
+    "updated_at": "2026-08-28T01:00:00Z"
   }
 }

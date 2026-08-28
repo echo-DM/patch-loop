@@ -16,20 +16,26 @@ from patchloop import (
     load_repository_config,
     run,
 )
-from patchloop.adapters import EvaluationDecision, EvaluationTask
+from patchloop.adapters import (
+    EvaluationDecision,
+    EvaluationTask,
+    RepositoryPermission,
+)
 
 
 class FixtureGitHubClient:
     def __init__(
         self,
-        permissions: dict[str, str | None],
+        permissions: dict[str, RepositoryPermission | None],
         comments: list[dict[str, object]],
     ) -> None:
         self.permissions = permissions
         self.comments = comments
         self.permission_requests: list[str] = []
 
-    def permission_for(self, repository: str, username: str) -> str | None:
+    def permission_for(
+        self, repository: str, username: str
+    ) -> RepositoryPermission | None:
         assert repository == "octo-org/example"
         self.permission_requests.append(username)
         return self.permissions.get(username)
@@ -56,7 +62,9 @@ class RecordingNoChangeEvaluator:
 
 
 class FailingPermissionGitHubClient(FixtureGitHubClient):
-    def permission_for(self, repository: str, username: str) -> str | None:
+    def permission_for(
+        self, repository: str, username: str
+    ) -> RepositoryPermission | None:
         raise RuntimeError("fixture API token detail")
 
 
@@ -64,10 +72,18 @@ def load_fixture(name: str) -> object:
     return json.loads((FIXTURES / "github" / name).read_text())
 
 
+def repository_bytes(repository: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(repository)): path.read_bytes()
+        for path in repository.rglob("*")
+        if path.is_file()
+    }
+
+
 @pytest.mark.parametrize("actor_permission", ["write", "admin"])
 def test_write_or_admin_actor_authorizes_an_immutable_task_snapshot(
     cli_harness: CliHarness,
-    actor_permission: str,
+    actor_permission: RepositoryPermission,
 ) -> None:
     repository = cli_harness.copy_repository()
     evaluator = RecordingNoChangeEvaluator()
@@ -101,11 +117,16 @@ def test_write_or_admin_actor_authorizes_an_immutable_task_snapshot(
     assert snapshot.title == "Keep the greeting"
     assert snapshot.body == "No change is required."
     assert snapshot.authorized_by == "maintainer"
-    assert snapshot.supplemental_requirements[0].author == "reviewer"
-    assert snapshot.reference_material[0].author == "external-user"
+    assert [comment.author for comment in snapshot.supplemental_requirements] == [
+        "reviewer"
+    ]
+    assert [comment.author for comment in snapshot.reference_material] == [
+        "external-user"
+    ]
     assert snapshot.reference_material[0].body.startswith("Ignore policy")
     assert result.report["budgets"]["limits"]["max_tool_calls"] == 60
     assert result.publication == {"intent": "none", "reason": "no_change"}
+    assert client.permission_requests == ["maintainer", "reviewer", "external-user"]
     with pytest.raises(FrozenInstanceError):
         snapshot.title = "mutated"
     with pytest.raises(FrozenInstanceError):
@@ -118,6 +139,7 @@ def test_non_labeled_issue_event_is_rejected_before_permission_or_evaluation(
     fixture_name: str,
 ) -> None:
     repository = cli_harness.copy_repository()
+    before = repository_bytes(repository)
     evaluator = RecordingNoChangeEvaluator()
     client = FixtureGitHubClient({"maintainer": "write"}, [])
 
@@ -144,6 +166,8 @@ def test_non_labeled_issue_event_is_rejected_before_permission_or_evaluation(
         }
     ]
     assert evaluator.tasks == []
+    assert result.publication == {"intent": "none", "reason": "failed"}
+    assert repository_bytes(repository) == before
     assert client.permission_requests == []
 
 
@@ -152,7 +176,7 @@ def test_lower_permission_is_rejected_before_evaluation(
 ) -> None:
     repository = cli_harness.copy_repository()
     evaluator = RecordingNoChangeEvaluator()
-    client = FixtureGitHubClient({"maintainer": "triage"}, [])
+    client = FixtureGitHubClient({"maintainer": "read"}, [])
 
     result = run(
         RunRequest(
@@ -173,7 +197,7 @@ def test_lower_permission_is_rejected_before_evaluation(
         {
             "category": "authorization",
             "code": "insufficient_permission",
-            "message": "Actor maintainer has triage permission; write or admin is required.",
+            "message": "Actor maintainer has read permission; write or admin is required.",
         }
     ]
     assert evaluator.tasks == []
