@@ -174,7 +174,6 @@ def run(request: RunRequest) -> RunResult:
     if decision is None:
         assert task is not None
         task = _sanitize_evaluation_task(task)
-        task_id = task.id
         decision = evaluate_task(
             task,
             request.repository,
@@ -249,7 +248,7 @@ def run(request: RunRequest) -> RunResult:
     }
     report: RunReport = {
         "report_version": "1",
-        "task_id": task_id,
+        "task_id": redact_text(task_id),
         "terminal_outcome": decision.terminal_outcome,
         "summary": redact_text(decision.summary),
         "actionable_message": redact_text(decision.actionable_message),
@@ -281,7 +280,7 @@ def _sanitize_evaluation_task(task: EvaluationTask) -> EvaluationTask:
         )
 
     return EvaluationTask(
-        id=redact_text(task.id),
+        id=task.id,
         title=redact_text(task.title),
         body=redact_text(task.body),
         authorized_by=(
