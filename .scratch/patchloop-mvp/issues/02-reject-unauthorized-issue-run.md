@@ -4,13 +4,21 @@
 
 **Blocked by:** 01 — 建立可执行的 no_change tracer bullet
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 输入事件只有在添加目标标签时才被识别为 PatchLoop 触发请求。
-- [ ] GitHub adapter 能把事件、Issue、触发者和评论规范化为一次不可变任务快照。
-- [ ] 有效权限为 `write` 或 `admin` 时允许进入执行模块；其他权限、未知用户和权限查询失败得到不同的可观察结果。
-- [ ] 被拒绝的运行不会调用 Model adapter、Verifier adapter 或任何仓库写操作。
-- [ ] Issue 标题和正文被记录为经维护者授权的任务要求。
-- [ ] 有写权限作者的评论被归类为补充要求；其他评论被隔离为低信任参考资料。
-- [ ] 外部评论中的提示词不能改变工具、预算、凭据、发布或授权策略。
-- [ ] 授权与拒绝场景均通过黑盒 `run` interface 和固定 GitHub fixtures 验证。
+- [x] 输入事件只有在添加目标标签时才被识别为 PatchLoop 触发请求。
+- [x] GitHub adapter 能把事件、Issue、触发者和评论规范化为一次不可变任务快照。
+- [x] 有效权限为 `write` 或 `admin` 时允许进入执行模块；其他权限、未知用户和权限查询失败得到不同的可观察结果。
+- [x] 被拒绝的运行不会调用 Model adapter、Verifier adapter 或任何仓库写操作。
+- [x] Issue 标题和正文被记录为经维护者授权的任务要求。
+- [x] 有写权限作者的评论被归类为补充要求；其他评论被隔离为低信任参考资料。
+- [x] 外部评论中的提示词不能改变工具、预算、凭据、发布或授权策略。
+- [x] 授权与拒绝场景均通过黑盒 `run` interface 和固定 GitHub fixtures 验证。
+
+## Answer
+
+Implemented a GitHub Issue gate at the public `run` boundary. It recognizes only `issues/labeled` events for the configured `patchloop` label, checks the triggering actor before evaluation, freezes authorized Issue data into immutable task and comment values, and separates write/admin comments from low-trust reference material. Rejections return distinct sanitized authorization errors without invoking the evaluator or producing repository changes.
+
+## Comments
+
+- 2026-08-28: Validated write/admin authorization, non-trigger events, lower permissions, unknown actors, permission lookup failures, immutable snapshots, and hostile external comments with fixed GitHub fixtures. `uv lock --check`, strict `mypy`, the full offline pytest suite (17 tests), package build, and `git diff --check` all pass.

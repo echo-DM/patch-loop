@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal, Mapping, TypedDict
 
-from patchloop.adapters import EvaluationTask, TaskEvaluator
+from patchloop.adapters import (
+    EvaluationDecision,
+    EvaluationTask,
+    GateRejection,
+    GitHubIssueAdapter,
+    TaskEvaluator,
+)
 from patchloop.config import RepositoryConfig
 from patchloop.errors import InfrastructureError
 from patchloop.sanitize import redact_text
@@ -76,13 +82,19 @@ class TaskSnapshot:
 
 
 @dataclass(frozen=True)
+class GitHubEventTask:
+    document: Mapping[str, object]
+
+
+@dataclass(frozen=True)
 class RunAdapters:
     evaluator: TaskEvaluator
+    github: GitHubIssueAdapter | None = None
 
 
 @dataclass(frozen=True)
 class RunRequest:
-    task: TaskSnapshot
+    task: TaskSnapshot | GitHubEventTask
     repository: Path
     config: RepositoryConfig
     adapters: RunAdapters
@@ -108,15 +120,53 @@ def validate_repository_workspace(repository: Path) -> None:
 def run(request: RunRequest) -> RunResult:
     """Execute a PatchLoop task through its stable black-box boundary."""
     validate_repository_workspace(request.repository)
-    decision = request.adapters.evaluator.evaluate(
-        EvaluationTask(
+    decision: EvaluationDecision | None = None
+    if isinstance(request.task, GitHubEventTask):
+        if request.adapters.github is None:
+            raise InfrastructureError(
+                "github_adapter_missing",
+                "A GitHub adapter is required for GitHub event tasks.",
+            )
+        resolution = request.adapters.github.resolve(request.task.document)
+        if isinstance(resolution, GateRejection):
+            task = None
+            task_id = resolution.task_id
+            decision = EvaluationDecision(
+                terminal_outcome="failed",
+                summary="The GitHub event was not authorized to run PatchLoop.",
+                actionable_message=resolution.message,
+                errors=(
+                    {
+                        "category": "authorization",
+                        "code": resolution.code,
+                        "message": resolution.message,
+                    },
+                ),
+            )
+        else:
+            task = EvaluationTask(
+                id=resolution.id,
+                title=resolution.title,
+                body=resolution.body,
+                authorized_by=resolution.authorized_by,
+                supplemental_requirements=resolution.supplemental_requirements,
+                reference_material=resolution.reference_material,
+            )
+            task_id = task.id
+    else:
+        task = EvaluationTask(
             id=request.task.id,
             title=request.task.title,
             body=request.task.body,
-        ),
-        request.repository,
-        request.config,
-    )
+        )
+        task_id = task.id
+    if decision is None:
+        assert task is not None
+        decision = request.adapters.evaluator.evaluate(
+            task,
+            request.repository,
+            request.config,
+        )
     verification: VerificationReport = {
         "status": "not_run",
         "configured_checks": [
@@ -156,7 +206,7 @@ def run(request: RunRequest) -> RunResult:
     }
     report: RunReport = {
         "report_version": "1",
-        "task_id": request.task.id,
+        "task_id": task_id,
         "terminal_outcome": decision.terminal_outcome,
         "summary": decision.summary,
         "actionable_message": decision.actionable_message,

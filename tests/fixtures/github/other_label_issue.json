@@ -1,0 +1,11 @@
+{
+  "action": "labeled",
+  "label": {"name": "bug"},
+  "repository": {"full_name": "octo-org/example"},
+  "sender": {"login": "maintainer"},
+  "issue": {
+    "number": 42,
+    "title": "Keep the greeting",
+    "body": "No change is required."
+  }
+}
