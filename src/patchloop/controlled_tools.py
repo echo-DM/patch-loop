@@ -28,21 +28,14 @@ class PatchBundle:
     changed_files: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _ToolRegistration:
+    definition: ToolDefinition
+    handler: Callable[[Mapping[str, object]], object]
+
+
 class ControlledTools:
     """Validate and execute the complete model-visible capability set."""
-
-    definitions = (
-        ToolDefinition("list_files", "List workspace files below a path.", (), ("path",)),
-        ToolDefinition(
-            "search_code", "Search text files for an exact string.", ("query",), ("path",)
-        ),
-        ToolDefinition("read_file", "Read one UTF-8 workspace file.", ("path",)),
-        ToolDefinition(
-            "apply_patch", "Replace one UTF-8 workspace file.", ("path", "content")
-        ),
-        ToolDefinition("inspect_diff", "Inspect the current unified diff.", ()),
-        ToolDefinition("run_checks", "Run the configured checks through the verifier.", ()),
-    )
 
     def __init__(
         self,
@@ -57,28 +50,76 @@ class ControlledTools:
         self._original_files: dict[str, bytes | None] = {}
         self.latest_verification: VerificationResult | None = None
         self.verified_patch_sha256: str | None = None
-        self._handlers: dict[str, Callable[[Mapping[str, object]], object]] = {
-            "list_files": self._list_files,
-            "search_code": self._search_code,
-            "read_file": self._read_file,
-            "apply_patch": self._apply_patch,
-            "inspect_diff": self._inspect_diff,
-            "run_checks": self._run_checks,
+        registrations = (
+            _ToolRegistration(
+                ToolDefinition(
+                    "list_files", "List workspace files below a path.", (), ("path",)
+                ),
+                self._list_files,
+            ),
+            _ToolRegistration(
+                ToolDefinition(
+                    "search_code",
+                    "Search text files for an exact string.",
+                    ("query",),
+                    ("path",),
+                ),
+                self._search_code,
+            ),
+            _ToolRegistration(
+                ToolDefinition(
+                    "read_file", "Read one UTF-8 workspace file.", ("path",)
+                ),
+                self._read_file,
+            ),
+            _ToolRegistration(
+                ToolDefinition(
+                    "apply_patch",
+                    "Replace one UTF-8 workspace file.",
+                    ("path", "content"),
+                ),
+                self._apply_patch,
+            ),
+            _ToolRegistration(
+                ToolDefinition("inspect_diff", "Inspect the current unified diff.", ()),
+                self._inspect_diff,
+            ),
+            _ToolRegistration(
+                ToolDefinition(
+                    "run_checks", "Run configured checks through the verifier.", ()
+                ),
+                self._run_checks,
+            ),
+        )
+        self._registrations = {
+            registration.definition.name: registration
+            for registration in registrations
         }
+
+    @property
+    def definitions(self) -> tuple[ToolDefinition, ...]:
+        return tuple(
+            registration.definition for registration in self._registrations.values()
+        )
 
     def execute(self, call: ToolCall) -> ToolResult:
         if not call.id or call.id in self._seen_call_ids:
             return self._error(call, "duplicate_tool_call", "Tool call ids must be unique.")
         self._seen_call_ids.add(call.id)
-        handler = self._handlers.get(call.name)
-        if handler is None:
+        registration = self._registrations.get(call.name)
+        if registration is None:
             return self._error(
                 call,
                 "unknown_tool",
                 f"Unknown controlled tool: {redact_text(call.name)}.",
             )
         try:
-            output = handler(call.arguments)
+            self._validate_arguments(
+                call.arguments,
+                registration.definition.required_arguments,
+                registration.definition.optional_arguments,
+            )
+            output = registration.handler(call.arguments)
         except ToolInputError as error:
             return self._error(call, error.code, error.message)
         except OSError:
@@ -103,7 +144,6 @@ class ControlledTools:
         )
 
     def _list_files(self, arguments: Mapping[str, object]) -> object:
-        self._validate_arguments(arguments, (), ("path",))
         raw_path = arguments.get("path", ".")
         path = self._resolve_existing_path(raw_path, allow_root=True)
         if path.is_file():
@@ -123,7 +163,6 @@ class ControlledTools:
         return sorted(files)
 
     def _search_code(self, arguments: Mapping[str, object]) -> object:
-        self._validate_arguments(arguments, ("query",), ("path",))
         query = self._non_empty_string(arguments["query"], "query")
         path = self._resolve_existing_path(arguments.get("path", "."), allow_root=True)
         candidates = [path] if path.is_file() else [
@@ -151,7 +190,6 @@ class ControlledTools:
         return matches
 
     def _read_file(self, arguments: Mapping[str, object]) -> object:
-        self._validate_arguments(arguments, ("path",))
         path = self._resolve_existing_path(arguments["path"])
         if not path.is_file():
             raise ToolInputError("invalid_path", "read_file requires a regular file.")
@@ -163,7 +201,6 @@ class ControlledTools:
             ) from error
 
     def _apply_patch(self, arguments: Mapping[str, object]) -> object:
-        self._validate_arguments(arguments, ("path", "content"))
         content = self._string(arguments["content"], "content")
         if redact_text(content) != content:
             raise ToolInputError(
@@ -193,12 +230,11 @@ class ControlledTools:
         return {"path": relative_path, "applied": True}
 
     def _inspect_diff(self, arguments: Mapping[str, object]) -> object:
-        self._validate_arguments(arguments, ())
         content, changed_files = self._diff()
         return {"content": content, "changed_files": list(changed_files)}
 
     def _run_checks(self, arguments: Mapping[str, object]) -> object:
-        self._validate_arguments(arguments, ())
+        _ = arguments
         candidate = self.patch_bundle()
         self.verified_patch_sha256 = candidate.sha256 if candidate is not None else None
         self.latest_verification = self._verifier.verify(
