@@ -86,10 +86,15 @@ class PatchCompletion:
 class ModelTurn:
     tool_calls: tuple[ToolCall, ...] = ()
     completion: PatchCompletion | None = None
+    decision: EvaluationDecision | None = None
 
     @classmethod
     def complete(cls, summary: str, actionable_message: str) -> ModelTurn:
         return cls(completion=PatchCompletion(summary, actionable_message))
+
+    @classmethod
+    def decide(cls, decision: EvaluationDecision) -> ModelTurn:
+        return cls(decision=decision)
 
 
 class PatchModel(Protocol):

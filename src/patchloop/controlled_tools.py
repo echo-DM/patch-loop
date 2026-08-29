@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping
@@ -53,7 +54,7 @@ class ControlledTools:
         self._checks = checks
         self._verifier = verifier
         self._seen_call_ids: set[str] = set()
-        self._baseline = self._snapshot()
+        self._original_files: dict[str, bytes | None] = {}
         self.latest_verification: VerificationResult | None = None
         self.verified_patch_sha256: str | None = None
         self._handlers: dict[str, Callable[[Mapping[str, object]], object]] = {
@@ -100,20 +101,6 @@ class ControlledTools:
             byte_length=len(encoded),
             changed_files=changed_files,
         )
-
-    def _snapshot(self) -> dict[str, bytes]:
-        snapshot: dict[str, bytes] = {}
-        for root, directories, files in os.walk(self._repository, followlinks=False):
-            directories[:] = [
-                name
-                for name in directories
-                if name != ".git" and not (Path(root) / name).is_symlink()
-            ]
-            for name in files:
-                path = Path(root) / name
-                if not path.is_symlink():
-                    snapshot[path.relative_to(self._repository).as_posix()] = path.read_bytes()
-        return snapshot
 
     def _list_files(self, arguments: Mapping[str, object]) -> object:
         self._validate_arguments(arguments, (), ("path",))
@@ -198,9 +185,12 @@ class ControlledTools:
                     "credential_content_rejected",
                     "Patch inputs must not contain credential-shaped values.",
                 )
+        relative_path = path.relative_to(self._repository).as_posix()
+        if relative_path not in self._original_files:
+            self._original_files[relative_path] = path.read_bytes() if path.exists() else None
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-        return {"path": path.relative_to(self._repository).as_posix(), "applied": True}
+        self._replace_text(path, content)
+        return {"path": relative_path, "applied": True}
 
     def _inspect_diff(self, arguments: Mapping[str, object]) -> object:
         self._validate_arguments(arguments, ())
@@ -228,18 +218,17 @@ class ControlledTools:
         }
 
     def _diff(self) -> tuple[str, tuple[str, ...]]:
-        current = self._snapshot()
         changed_files = tuple(
             sorted(
                 path
-                for path in set(self._baseline) | set(current)
-                if self._baseline.get(path) != current.get(path)
+                for path, before in self._original_files.items()
+                if before != (self._repository / path).read_bytes()
             )
         )
         chunks: list[str] = []
         for path in changed_files:
-            before = self._decode_snapshot(self._baseline.get(path), path)
-            after = self._decode_snapshot(current.get(path), path)
+            before = self._decode_snapshot(self._original_files[path], path)
+            after = self._decode_snapshot((self._repository / path).read_bytes(), path)
             chunks.extend(
                 difflib.unified_diff(
                     before.splitlines(keepends=True),
@@ -249,6 +238,23 @@ class ControlledTools:
                 )
             )
         return "".join(chunks), changed_files
+
+    @staticmethod
+    def _replace_text(path: Path, content: str) -> None:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=".patchloop-",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+            if path.exists():
+                os.chmod(temporary, path.stat(follow_symlinks=False).st_mode & 0o777)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _decode_snapshot(value: bytes | None, path: str) -> str:

@@ -10,32 +10,14 @@ from patchloop.adapters import (
     ModelTurn,
     ToolCall,
     VerificationResult,
+    EvaluationDecision,
 )
 
 
 def test_controlled_tools_generate_an_integrity_checked_patch(
     tmp_path: Path,
 ) -> None:
-    repository = tmp_path / "repository"
-    repository.mkdir()
-    (repository / "README.md").write_text("Hello, world!\n")
-    (repository / ".patchloop.yml").write_text(
-        """\
-version: 1
-model: deterministic
-verifier:
-  image: fixture
-  setup: []
-  checks:
-    - check greeting
-budgets:
-  max_iterations: 3
-  max_tool_calls: 60
-  max_changed_files: 20
-  max_diff_lines: 2000
-  max_wall_time_minutes: 30
-"""
-    )
+    repository = configured_repository(tmp_path)
     model = DeterministicPatchModelAdapter(
         (
             ModelTurn(tool_calls=(ToolCall("list", "list_files", {"path": "."}),)),
@@ -247,6 +229,84 @@ def test_patch_changed_after_checks_is_not_publishable(tmp_path: Path) -> None:
     assert result.publication == {"intent": "none", "reason": "failed"}
     assert result.report["changed_files"] == {"count": 1, "paths": ["README.md"]}
     assert result.report["errors"][0]["code"] == "patch_changed_after_verification"
+
+
+def test_patch_model_can_stop_for_clarification_without_editing(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    model = DeterministicPatchModelAdapter(
+        (
+            ModelTurn.decide(
+                EvaluationDecision(
+                    terminal_outcome="needs_clarification",
+                    summary="The target greeting is ambiguous.",
+                    actionable_message="Choose the intended greeting.",
+                    clarification_questions=("What exact greeting should replace the current one?",),
+                )
+            ),
+        )
+    )
+
+    result = run(
+        RunRequest(
+            task=TaskSnapshot("issue-107", "Change greeting", "Make it better."),
+            repository=repository,
+            config=load_repository_config(repository / ".patchloop.yml"),
+            adapters=RunAdapters(
+                model=model,
+                verifier=DeterministicVerifierAdapter(
+                    VerificationResult.passed(("check greeting",))
+                ),
+            ),
+        )
+    )
+
+    assert result.terminal_outcome == "needs_clarification"
+    assert result.patch is None
+    assert result.publication["intent"] == "issue_feedback"
+    assert (repository / "README.md").read_text() == "Hello, world!\n"
+
+
+def test_replacing_a_hard_link_does_not_write_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside content\n")
+    linked = repository / "linked.txt"
+    linked.hardlink_to(outside)
+    model = DeterministicPatchModelAdapter(
+        (
+            ModelTurn(
+                tool_calls=(
+                    ToolCall(
+                        "edit-link",
+                        "apply_patch",
+                        {"path": "linked.txt", "content": "workspace content\n"},
+                    ),
+                    ToolCall("checks", "run_checks", {}),
+                )
+            ),
+            ModelTurn.complete("Replace the linked file.", "Review the Draft PR."),
+        )
+    )
+
+    result = run(
+        RunRequest(
+            task=TaskSnapshot("issue-108", "Replace file", "Replace linked.txt."),
+            repository=repository,
+            config=load_repository_config(repository / ".patchloop.yml"),
+            adapters=RunAdapters(
+                model=model,
+                verifier=DeterministicVerifierAdapter(
+                    VerificationResult.passed(("check greeting",))
+                ),
+            ),
+        )
+    )
+
+    assert result.terminal_outcome == "pr_created"
+    assert linked.read_text() == "workspace content\n"
+    assert outside.read_text() == "outside content\n"
 
 
 def configured_repository(tmp_path: Path) -> Path:

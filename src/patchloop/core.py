@@ -222,6 +222,14 @@ def run(request: RunRequest) -> RunResult:
             request.config,
             request.adapters.evaluator,
         )
+    return _result_from_decision(task_id, decision, request.config)
+
+
+def _result_from_decision(
+    task_id: str,
+    decision: EvaluationDecision,
+    config: RepositoryConfig,
+) -> RunResult:
     questions = _validate_clarification_questions(decision)
     if decision.terminal_outcome == "pr_created":
         decision = EvaluationDecision(
@@ -257,13 +265,7 @@ def run(request: RunRequest) -> RunResult:
         )
         questions = ()
     assert questions is not None
-    verification: VerificationReport = {
-        "status": "not_run",
-        "configured_checks": [
-            redact_text(command) for command in request.config.verifier.checks
-        ],
-        "checks": [],
-    }
+    verification = _verification_report(config, "not_run", [])
     publication: PublicationIntent
     if decision.terminal_outcome == "needs_clarification":
         publication = {
@@ -286,13 +288,7 @@ def run(request: RunRequest) -> RunResult:
     ]
     changed_files: ChangedFilesReport = {"count": 0, "paths": []}
     budgets: BudgetsReport = {
-        "limits": {
-            "max_iterations": request.config.budgets.max_iterations,
-            "max_tool_calls": request.config.budgets.max_tool_calls,
-            "max_changed_files": request.config.budgets.max_changed_files,
-            "max_diff_lines": request.config.budgets.max_diff_lines,
-            "max_wall_time_minutes": request.config.budgets.max_wall_time_minutes,
-        },
+        "limits": _budget_limits(config),
         "usage": {
             "iterations": 0,
             "tool_calls": 0,
@@ -341,15 +337,31 @@ def _run_patch(
     error: ReportError | None = None
     for _ in range(config.budgets.max_tool_calls + 1):
         turn = model.next_turn(task, observations, tools.definitions)
-        if turn.completion is not None:
-            if turn.tool_calls:
+        selected_actions = sum(
+            (
+                bool(turn.tool_calls),
+                turn.completion is not None,
+                turn.decision is not None,
+            )
+        )
+        if selected_actions > 1:
+            error = {
+                "category": "model",
+                "code": "invalid_model_turn",
+                "message": "A model turn must select exactly one kind of action.",
+            }
+            break
+        if turn.decision is not None:
+            if tools.patch_bundle() is not None:
                 error = {
                     "category": "model",
-                    "code": "invalid_model_turn",
-                    "message": "A model turn cannot both call tools and complete the task.",
+                    "code": "decision_after_edit",
+                    "message": "A no-patch decision cannot follow repository edits.",
                 }
-            else:
-                completion = turn.completion
+                break
+            return _result_from_decision(task.id, turn.decision, config)
+        if turn.completion is not None:
+            completion = turn.completion
             break
         if not turn.tool_calls:
             error = {
@@ -420,26 +432,14 @@ def _run_patch(
             }
             for check in verification_result.checks
         ]
-    verification: VerificationReport = {
-        "status": verification_status,
-        "configured_checks": [
-            redact_text(command) for command in config.verifier.checks
-        ],
-        "checks": checks,
-    }
+    verification = _verification_report(config, verification_status, checks)
     changed_paths = list(patch.changed_files) if patch is not None else []
     changed_files: ChangedFilesReport = {
         "count": len(changed_paths),
         "paths": changed_paths,
     }
     budgets: BudgetsReport = {
-        "limits": {
-            "max_iterations": config.budgets.max_iterations,
-            "max_tool_calls": config.budgets.max_tool_calls,
-            "max_changed_files": config.budgets.max_changed_files,
-            "max_diff_lines": config.budgets.max_diff_lines,
-            "max_wall_time_minutes": config.budgets.max_wall_time_minutes,
-        },
+        "limits": _budget_limits(config),
         "usage": {
             "iterations": 1 if patch is not None else 0,
             "tool_calls": tool_calls,
@@ -508,6 +508,30 @@ def _diff_line_count(content: str) -> int:
         for line in content.splitlines()
         if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
     )
+
+
+def _budget_limits(config: RepositoryConfig) -> BudgetLimitsReport:
+    return {
+        "max_iterations": config.budgets.max_iterations,
+        "max_tool_calls": config.budgets.max_tool_calls,
+        "max_changed_files": config.budgets.max_changed_files,
+        "max_diff_lines": config.budgets.max_diff_lines,
+        "max_wall_time_minutes": config.budgets.max_wall_time_minutes,
+    }
+
+
+def _verification_report(
+    config: RepositoryConfig,
+    status: Literal["not_run", "checks_passed", "checks_failed"],
+    checks: list[object],
+) -> VerificationReport:
+    return {
+        "status": status,
+        "configured_checks": [
+            redact_text(command) for command in config.verifier.checks
+        ],
+        "checks": checks,
+    }
 
 
 def _sanitize_evaluation_task(task: EvaluationTask) -> EvaluationTask:
