@@ -1,7 +1,9 @@
 """PatchLoop's public execution interface."""
 
 from patchloop.adapters import (
+    DeterministicPatchModelAdapter,
     DeterministicModelAdapter,
+    DeterministicVerifierAdapter,
     GitHubIssueAdapter,
     TaskEvaluator,
 )
@@ -18,7 +20,9 @@ from patchloop.core import (
 __all__ = [
     "GitHubEventTask",
     "GitHubIssueAdapter",
+    "DeterministicPatchModelAdapter",
     "DeterministicModelAdapter",
+    "DeterministicVerifierAdapter",
     "RepositoryConfig",
     "RunAdapters",
     "RunRequest",

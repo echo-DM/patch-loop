@@ -9,7 +9,7 @@ from patchloop.config import RepositoryConfig
 
 
 RepositoryPermission = Literal["admin", "write", "read", "none"]
-TerminalOutcome = Literal["needs_clarification", "no_change", "failed"]
+TerminalOutcome = Literal["pr_created", "needs_clarification", "no_change", "failed"]
 WRITE_PERMISSIONS: frozenset[RepositoryPermission] = frozenset({"admin", "write"})
 
 
@@ -50,6 +50,121 @@ class TaskEvaluator(Protocol):
         repository: Path,
         config: RepositoryConfig,
     ) -> EvaluationDecision: ...
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    name: str
+    description: str
+    required_arguments: tuple[str, ...]
+    optional_arguments: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    call_id: str
+    name: str
+    ok: bool
+    output: object | None = None
+    error: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class PatchCompletion:
+    summary: str
+    actionable_message: str
+
+
+@dataclass(frozen=True)
+class ModelTurn:
+    tool_calls: tuple[ToolCall, ...] = ()
+    completion: PatchCompletion | None = None
+
+    @classmethod
+    def complete(cls, summary: str, actionable_message: str) -> ModelTurn:
+        return cls(completion=PatchCompletion(summary, actionable_message))
+
+
+class PatchModel(Protocol):
+    def next_turn(
+        self,
+        task: EvaluationTask,
+        observations: tuple[ToolResult, ...],
+        available_tools: tuple[ToolDefinition, ...],
+    ) -> ModelTurn: ...
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    command: str
+    status: Literal["passed", "failed"]
+    exit_code: int
+    output: str = ""
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    status: Literal["checks_passed", "checks_failed"]
+    checks: tuple[CheckResult, ...]
+
+    @classmethod
+    def passed(cls, commands: Sequence[str]) -> VerificationResult:
+        return cls(
+            status="checks_passed",
+            checks=tuple(CheckResult(command, "passed", 0) for command in commands),
+        )
+
+
+@dataclass(frozen=True)
+class VerificationRequest:
+    repository: Path
+    checks: tuple[str, ...]
+
+
+class VerifierAdapter(Protocol):
+    def verify(self, request: VerificationRequest) -> VerificationResult: ...
+
+
+class DeterministicPatchModelAdapter:
+    """Replay fixture model turns while recording the controlled-tool interface."""
+
+    def __init__(self, turns: Sequence[ModelTurn]) -> None:
+        self._turns = iter(turns)
+        self.available_tools: tuple[ToolDefinition, ...] = ()
+        self.observations: list[tuple[ToolResult, ...]] = []
+
+    def next_turn(
+        self,
+        task: EvaluationTask,
+        observations: tuple[ToolResult, ...],
+        available_tools: tuple[ToolDefinition, ...],
+    ) -> ModelTurn:
+        _ = task
+        self.available_tools = available_tools
+        self.observations.append(observations)
+        try:
+            return next(self._turns)
+        except StopIteration:
+            return ModelTurn()
+
+
+class DeterministicVerifierAdapter:
+    """Return one fixture verification result without executing repository code."""
+
+    def __init__(self, result: VerificationResult) -> None:
+        self._result = result
+        self.requests: list[VerificationRequest] = []
+
+    def verify(self, request: VerificationRequest) -> VerificationResult:
+        self.requests.append(request)
+        return self._result
 
 
 class DeterministicModelAdapter:
