@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Mapping, Protocol, Sequence, cast
+from typing import Literal, Mapping, Protocol, Sequence, TypedDict, cast
 
 from patchloop.config import RepositoryConfig
 
@@ -11,6 +11,12 @@ from patchloop.config import RepositoryConfig
 RepositoryPermission = Literal["admin", "write", "read", "none"]
 TerminalOutcome = Literal["pr_created", "needs_clarification", "no_change", "failed"]
 WRITE_PERMISSIONS: frozenset[RepositoryPermission] = frozenset({"admin", "write"})
+
+
+class ReportEvent(TypedDict):
+    category: str
+    code: str
+    message: str
 
 
 def has_write_access(permission: RepositoryPermission | None) -> bool:

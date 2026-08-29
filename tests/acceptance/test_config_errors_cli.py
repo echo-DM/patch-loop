@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conftest import CliHarness
 
 
@@ -43,10 +45,24 @@ def test_missing_required_config_field_is_named(cli_harness: CliHarness) -> None
     }
 
 
-def test_budget_above_safety_ceiling_is_rejected(cli_harness: CliHarness) -> None:
+@pytest.mark.parametrize(
+    ("field", "ceiling"),
+    (
+        ("max_iterations", 3),
+        ("max_tool_calls", 60),
+        ("max_changed_files", 20),
+        ("max_diff_lines", 2000),
+        ("max_wall_time_minutes", 30),
+    ),
+)
+def test_budget_above_safety_ceiling_is_rejected(
+    cli_harness: CliHarness, field: str, ceiling: int
+) -> None:
     repository = cli_harness.copy_repository()
     config = repository / ".patchloop.yml"
-    config.write_text(config.read_text().replace("max_tool_calls: 60", "max_tool_calls: 61"))
+    config.write_text(
+        config.read_text().replace(f"{field}: {ceiling}", f"{field}: {ceiling + 1}")
+    )
 
     completed = cli_harness.run(repository)
 
@@ -56,7 +72,9 @@ def test_budget_above_safety_ceiling_is_rejected(cli_harness: CliHarness) -> Non
         "error": {
             "category": "configuration",
             "code": "unsafe_budget_value",
-            "message": "budgets.max_tool_calls must be between 1 and 60; got 61.",
+            "message": (
+                f"budgets.{field} must be between 1 and {ceiling}; got {ceiling + 1}."
+            ),
         }
     }
 

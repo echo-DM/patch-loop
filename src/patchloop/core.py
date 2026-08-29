@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping, NotRequired, TypedDict, cast
+from time import monotonic
+from typing import Callable, Literal, Mapping, NotRequired, TypedDict, cast
 
 from patchloop.adapters import (
     EvaluationDecision,
@@ -11,13 +12,19 @@ from patchloop.adapters import (
     GitHubTaskResolver,
     IssueComment,
     PatchModel,
+    ReportEvent,
     TaskEvaluator,
     TerminalOutcome,
     ToolResult,
     VerifierAdapter,
 )
 from patchloop.config import RepositoryConfig
-from patchloop.controlled_tools import ControlledTools, PatchBundle
+from patchloop.controlled_tools import (
+    MAX_PATCHED_FILE_BYTES,
+    ControlledTools,
+    PatchBundle,
+    diff_line_count,
+)
 from patchloop.errors import InfrastructureError
 from patchloop.graph import evaluate_task
 from patchloop.sanitize import redact_text
@@ -28,7 +35,9 @@ MAX_CLARIFICATION_QUESTION_CHARS = 240
 
 
 class VerificationReport(TypedDict):
-    status: Literal["not_run", "checks_passed", "checks_failed"]
+    status: Literal[
+        "not_run", "checks_passed", "checks_failed", "budget_exhausted"
+    ]
     configured_checks: list[str]
     checks: list[object]
 
@@ -44,6 +53,7 @@ class BudgetLimitsReport(TypedDict):
     max_changed_files: int
     max_diff_lines: int
     max_wall_time_minutes: int
+    max_file_bytes: int
 
 
 class BudgetUsageReport(TypedDict):
@@ -91,12 +101,6 @@ class IntegrityReport(TypedDict):
     patch_sha256: str
 
 
-class ReportError(TypedDict):
-    category: str
-    code: str
-    message: str
-
-
 class RunReport(TypedDict):
     report_version: Literal["1"]
     task_id: str
@@ -108,7 +112,7 @@ class RunReport(TypedDict):
     verification: VerificationReport
     budgets: BudgetsReport
     publication: PublicationIntent
-    errors: list[ReportError]
+    errors: list[ReportEvent]
     clarification_questions: NotRequired[list[str]]
     integrity: NotRequired[IntegrityReport]
 
@@ -131,6 +135,7 @@ class RunAdapters:
     github: GitHubTaskResolver | None = None
     model: PatchModel | None = None
     verifier: VerifierAdapter | None = None
+    clock: Callable[[], float] = monotonic
 
 
 @dataclass(frozen=True)
@@ -161,6 +166,7 @@ def validate_repository_workspace(repository: Path) -> None:
 
 def run(request: RunRequest) -> RunResult:
     """Execute a PatchLoop task through its stable black-box boundary."""
+    started_at = request.adapters.clock()
     validate_repository_workspace(request.repository)
     decision: EvaluationDecision | None = None
     if isinstance(request.task, GitHubEventTask):
@@ -210,6 +216,8 @@ def run(request: RunRequest) -> RunResult:
                 request.config,
                 request.adapters.model,
                 request.adapters.verifier,
+                request.adapters.clock,
+                started_at,
             )
         if request.adapters.evaluator is None:
             raise InfrastructureError(
@@ -222,13 +230,24 @@ def run(request: RunRequest) -> RunResult:
             request.config,
             request.adapters.evaluator,
         )
-    return _result_from_decision(task_id, decision, request.config)
+    elapsed_seconds = max(0.0, request.adapters.clock() - started_at)
+    if elapsed_seconds >= request.config.budgets.max_wall_time_minutes * 60:
+        return _wall_time_failure(task_id, request.config, elapsed_seconds)
+    return _result_from_decision(
+        task_id,
+        decision,
+        request.config,
+        wall_time_minutes=int(elapsed_seconds // 60),
+    )
 
 
 def _result_from_decision(
     task_id: str,
     decision: EvaluationDecision,
     config: RepositoryConfig,
+    *,
+    wall_time_minutes: int = 0,
+    budget_error: ReportEvent | None = None,
 ) -> RunResult:
     questions = _validate_clarification_questions(decision)
     if decision.terminal_outcome == "pr_created":
@@ -265,7 +284,9 @@ def _result_from_decision(
         )
         questions = ()
     assert questions is not None
-    verification = _verification_report(config, "not_run", [])
+    verification = _verification_report(
+        config, "budget_exhausted" if budget_error is not None else "not_run", []
+    )
     publication: PublicationIntent
     if decision.terminal_outcome == "needs_clarification":
         publication = {
@@ -278,7 +299,7 @@ def _result_from_decision(
             "intent": "none",
             "reason": cast(Literal["no_change", "failed"], decision.terminal_outcome),
         }
-    errors: list[ReportError] = [
+    errors: list[ReportEvent] = [
         {
             "category": error["category"],
             "code": error["code"],
@@ -286,6 +307,8 @@ def _result_from_decision(
         }
         for error in decision.errors
     ]
+    if budget_error is not None:
+        errors.append(budget_error)
     changed_files: ChangedFilesReport = {"count": 0, "paths": []}
     budgets: BudgetsReport = {
         "limits": _budget_limits(config),
@@ -294,9 +317,9 @@ def _result_from_decision(
             "tool_calls": 0,
             "changed_files": 0,
             "diff_lines": 0,
-            "wall_time_minutes": 0,
+            "wall_time_minutes": wall_time_minutes,
         },
-        "resource_limit_events": [],
+        "resource_limit_events": [budget_error] if budget_error is not None else [],
     }
     report: RunReport = {
         "report_version": "1",
@@ -329,14 +352,29 @@ def _run_patch(
     config: RepositoryConfig,
     model: PatchModel,
     verifier: VerifierAdapter,
+    clock: Callable[[], float],
+    started_at: float,
 ) -> RunResult:
-    tools = ControlledTools(repository, config.verifier.checks, verifier)
+    tools = ControlledTools(repository, config.verifier.checks, config.budgets, verifier)
+    elapsed_seconds = 0.0
+
+    def check_wall_time() -> ReportEvent | None:
+        nonlocal elapsed_seconds
+        elapsed_seconds = max(0.0, clock() - started_at)
+        if elapsed_seconds >= config.budgets.max_wall_time_minutes * 60:
+            return _wall_time_limit_error()
+        return None
+
     observations: tuple[ToolResult, ...] = ()
     tool_calls = 0
     completion = None
-    error: ReportError | None = None
+    error: ReportEvent | None = None
     for _ in range(config.budgets.max_tool_calls + 1):
+        if (error := check_wall_time()) is not None:
+            break
         turn = model.next_turn(task, observations, tools.definitions)
+        if (error := check_wall_time()) is not None:
+            break
         selected_actions = sum(
             (
                 bool(turn.tool_calls),
@@ -359,7 +397,12 @@ def _run_patch(
                     "message": "A no-patch decision cannot follow repository edits.",
                 }
                 break
-            return _result_from_decision(task.id, turn.decision, config)
+            return _result_from_decision(
+                task.id,
+                turn.decision,
+                config,
+                wall_time_minutes=int(elapsed_seconds // 60),
+            )
         if turn.completion is not None:
             completion = turn.completion
             break
@@ -372,6 +415,8 @@ def _run_patch(
             break
         next_observations: list[ToolResult] = []
         for call in turn.tool_calls:
+            if (error := check_wall_time()) is not None:
+                break
             if tool_calls >= config.budgets.max_tool_calls:
                 error = {
                     "category": "budget",
@@ -381,11 +426,19 @@ def _run_patch(
                 break
             next_observations.append(tools.execute(call))
             tool_calls += 1
+            if (error := check_wall_time()) is not None:
+                break
+            if tools.exhaustion_event is not None:
+                error = tools.exhaustion_event
+                break
         observations = tuple(next_observations)
         if error is not None:
             break
 
     patch = tools.patch_bundle()
+    final_wall_error = check_wall_time()
+    if error is None and final_wall_error is not None:
+        error = final_wall_error
     verification_result = tools.latest_verification
     if completion is None and error is None:
         error = {
@@ -418,9 +471,9 @@ def _run_patch(
         }
 
     checks: list[object] = []
-    verification_status: Literal["not_run", "checks_passed", "checks_failed"] = (
-        "not_run"
-    )
+    verification_status: Literal[
+        "not_run", "checks_passed", "checks_failed", "budget_exhausted"
+    ] = "not_run"
     if verification_result is not None:
         verification_status = verification_result.status
         checks = [
@@ -432,6 +485,9 @@ def _run_patch(
             }
             for check in verification_result.checks
         ]
+    budget_exhausted = error is not None and error["category"] == "budget"
+    if budget_exhausted:
+        verification_status = "budget_exhausted"
     verification = _verification_report(config, verification_status, checks)
     changed_paths = list(patch.changed_files) if patch is not None else []
     changed_files: ChangedFilesReport = {
@@ -441,16 +497,16 @@ def _run_patch(
     budgets: BudgetsReport = {
         "limits": _budget_limits(config),
         "usage": {
-            "iterations": 1 if patch is not None else 0,
+            "iterations": tools.iterations,
             "tool_calls": tool_calls,
             "changed_files": len(changed_paths),
-            "diff_lines": _diff_line_count(patch.content) if patch is not None else 0,
-            "wall_time_minutes": 0,
+            "diff_lines": diff_line_count(patch.content) if patch is not None else 0,
+            "wall_time_minutes": int(elapsed_seconds // 60),
         },
-        "resource_limit_events": [],
+        "resource_limit_events": list(tools.policy_events)
+        + ([error] if budget_exhausted and error not in tools.policy_events else []),
     }
-    if error is None:
-        assert completion is not None
+    if error is None or (budget_exhausted and patch is not None):
         assert patch is not None
         publication: PublicationIntent = {
             "intent": "draft_pr",
@@ -458,9 +514,15 @@ def _run_patch(
             "patch_sha256": patch.sha256,
         }
         terminal_outcome: TerminalOutcome = "pr_created"
-        summary = completion.summary
-        actionable_message = completion.actionable_message
-        errors: list[ReportError] = []
+        if error is None:
+            assert completion is not None
+            summary = completion.summary
+            actionable_message = completion.actionable_message
+            errors: list[ReportEvent] = []
+        else:
+            summary = "PatchLoop preserved a legal patch after reaching a budget."
+            actionable_message = error["message"]
+            errors = [error]
     else:
         publication = {"intent": "none", "reason": "failed"}
         terminal_outcome = "failed"
@@ -502,11 +564,28 @@ def _run_patch(
     )
 
 
-def _diff_line_count(content: str) -> int:
-    return sum(
-        1
-        for line in content.splitlines()
-        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+def _wall_time_limit_error() -> ReportEvent:
+    return {
+        "category": "budget",
+        "code": "wall_time_limit_reached",
+        "message": "The configured wall-clock time limit was reached.",
+    }
+
+
+def _wall_time_failure(
+    task_id: str, config: RepositoryConfig, elapsed_seconds: float
+) -> RunResult:
+    error = _wall_time_limit_error()
+    return _result_from_decision(
+        task_id,
+        EvaluationDecision(
+            terminal_outcome="failed",
+            summary="PatchLoop stopped after reaching its total runtime budget.",
+            actionable_message=error["message"],
+        ),
+        config,
+        wall_time_minutes=int(elapsed_seconds // 60),
+        budget_error=error,
     )
 
 
@@ -517,12 +596,15 @@ def _budget_limits(config: RepositoryConfig) -> BudgetLimitsReport:
         "max_changed_files": config.budgets.max_changed_files,
         "max_diff_lines": config.budgets.max_diff_lines,
         "max_wall_time_minutes": config.budgets.max_wall_time_minutes,
+        "max_file_bytes": MAX_PATCHED_FILE_BYTES,
     }
 
 
 def _verification_report(
     config: RepositoryConfig,
-    status: Literal["not_run", "checks_passed", "checks_failed"],
+    status: Literal[
+        "not_run", "checks_passed", "checks_failed", "budget_exhausted"
+    ],
     checks: list[object],
 ) -> VerificationReport:
     return {

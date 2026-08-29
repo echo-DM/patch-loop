@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping
 
 from patchloop.adapters import (
+    ReportEvent,
     ToolCall,
     ToolDefinition,
     ToolResult,
@@ -16,7 +17,21 @@ from patchloop.adapters import (
     VerificationResult,
     VerifierAdapter,
 )
+from patchloop.config import BudgetConfig
 from patchloop.sanitize import redact_text
+
+
+MAX_PATCHED_FILE_BYTES = 1_000_000
+PROTECTED_PATHS = frozenset({".git", ".github/workflows", ".patchloop.yml"})
+PROTECTED_PREFIXES = (".git/", ".github/workflows/")
+
+
+def diff_line_count(content: str) -> int:
+    return sum(
+        1
+        for line in content.splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    )
 
 
 @dataclass(frozen=True)
@@ -41,15 +56,20 @@ class ControlledTools:
         self,
         repository: Path,
         checks: tuple[str, ...],
+        budgets: BudgetConfig,
         verifier: VerifierAdapter,
     ) -> None:
         self._repository = repository.resolve()
         self._checks = checks
+        self._budgets = budgets
         self._verifier = verifier
         self._seen_call_ids: set[str] = set()
         self._original_files: dict[str, bytes | None] = {}
         self.latest_verification: VerificationResult | None = None
         self.verified_patch_sha256: str | None = None
+        self.iterations = 0
+        self._exhaustion_event: ReportEvent | None = None
+        self.policy_events: list[ReportEvent] = []
         registrations = (
             _ToolRegistration(
                 ToolDefinition(
@@ -101,6 +121,10 @@ class ControlledTools:
         return tuple(
             registration.definition for registration in self._registrations.values()
         )
+
+    @property
+    def exhaustion_event(self) -> ReportEvent | None:
+        return self._exhaustion_event
 
     def execute(self, call: ToolCall) -> ToolResult:
         if not call.id or call.id in self._seen_call_ids:
@@ -201,6 +225,11 @@ class ControlledTools:
             ) from error
 
     def _apply_patch(self, arguments: Mapping[str, object]) -> object:
+        if self.iterations >= self._budgets.max_iterations:
+            self._exhaust_budget(
+                "iteration_limit_reached",
+                "The configured edit-and-verify iteration limit was reached.",
+            )
         content = self._string(arguments["content"], "content")
         if redact_text(content) != content:
             raise ToolInputError(
@@ -208,6 +237,17 @@ class ControlledTools:
                 "Patch content must not contain credential-shaped values.",
             )
         path = self._resolve_write_path(arguments["path"])
+        relative_path = path.relative_to(self._repository).as_posix()
+        if self._is_protected_path(relative_path):
+            self._reject_policy(
+                "protected_path",
+                "PatchLoop policy protects this path from model-authored changes.",
+            )
+        if len(content.encode()) > MAX_PATCHED_FILE_BYTES:
+            self._exhaust_budget(
+                "patched_file_size_limit_reached",
+                "The maximum patched-file size was exceeded.",
+            )
         if path.exists() and not path.is_file():
             raise ToolInputError("invalid_path", "apply_patch requires a regular file path.")
         if path.exists():
@@ -222,11 +262,26 @@ class ControlledTools:
                     "credential_content_rejected",
                     "Patch inputs must not contain credential-shaped values.",
                 )
-        relative_path = path.relative_to(self._repository).as_posix()
+        before_call = path.read_bytes() if path.exists() else None
         if relative_path not in self._original_files:
-            self._original_files[relative_path] = path.read_bytes() if path.exists() else None
+            self._original_files[relative_path] = before_call
         path.parent.mkdir(parents=True, exist_ok=True)
         self._replace_text(path, content)
+        try:
+            diff, changed_files = self._diff()
+            if len(changed_files) > self._budgets.max_changed_files:
+                self._exhaust_budget(
+                    "changed_file_limit_reached",
+                    "The configured changed-file limit was exceeded.",
+                )
+            if diff_line_count(diff) > self._budgets.max_diff_lines:
+                self._exhaust_budget(
+                    "diff_line_limit_reached",
+                    "The configured diff-line limit was exceeded.",
+                )
+        except ToolInputError:
+            self._restore(path, before_call)
+            raise
         return {"path": relative_path, "applied": True}
 
     def _inspect_diff(self, arguments: Mapping[str, object]) -> object:
@@ -235,11 +290,25 @@ class ControlledTools:
 
     def _run_checks(self, arguments: Mapping[str, object]) -> object:
         _ = arguments
+        if self.iterations >= self._budgets.max_iterations:
+            self._exhaust_budget(
+                "iteration_limit_reached",
+                "The configured edit-and-verify iteration limit was reached.",
+            )
         candidate = self.patch_bundle()
         self.verified_patch_sha256 = candidate.sha256 if candidate is not None else None
         self.latest_verification = self._verifier.verify(
             VerificationRequest(self._repository, self._checks)
         )
+        self.iterations += 1
+        if (
+            self.iterations >= self._budgets.max_iterations
+            and self.latest_verification.status == "checks_failed"
+        ):
+            self._record_budget_exhaustion(
+                "iteration_limit_reached",
+                "The configured edit-and-verify iteration limit was reached.",
+            )
         return {
             "status": self.latest_verification.status,
             "checks": [
@@ -258,13 +327,15 @@ class ControlledTools:
             sorted(
                 path
                 for path, before in self._original_files.items()
-                if before != (self._repository / path).read_bytes()
+                if before != self._current_bytes(self._repository / path)
             )
         )
         chunks: list[str] = []
         for path in changed_files:
             before = self._decode_snapshot(self._original_files[path], path)
-            after = self._decode_snapshot((self._repository / path).read_bytes(), path)
+            after = self._decode_snapshot(
+                self._current_bytes(self._repository / path), path
+            )
             chunks.extend(
                 difflib.unified_diff(
                     before.splitlines(keepends=True),
@@ -274,6 +345,57 @@ class ControlledTools:
                 )
             )
         return "".join(chunks), changed_files
+
+    @staticmethod
+    def _current_bytes(path: Path) -> bytes | None:
+        return path.read_bytes() if path.exists() else None
+
+    @classmethod
+    def _restore(cls, path: Path, content: bytes | None) -> None:
+        if content is None:
+            path.unlink(missing_ok=True)
+            return
+        cls._replace_bytes(path, content)
+
+    @staticmethod
+    def _replace_bytes(path: Path, content: bytes) -> None:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=".patchloop-",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+            if path.exists():
+                os.chmod(temporary, path.stat(follow_symlinks=False).st_mode & 0o777)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _is_protected_path(path: str) -> bool:
+        return path in PROTECTED_PATHS or path.startswith(PROTECTED_PREFIXES)
+
+    def _exhaust_budget(self, code: str, message: str) -> None:
+        self._record_budget_exhaustion(code, message)
+        raise ToolInputError(code, message)
+
+    def _record_budget_exhaustion(self, code: str, message: str) -> None:
+        event: ReportEvent = {
+            "category": "budget",
+            "code": code,
+            "message": message,
+        }
+        self._exhaustion_event = event
+        self.policy_events.append(event)
+
+    def _reject_policy(self, code: str, message: str) -> None:
+        self.policy_events.append(
+            {"category": "policy", "code": code, "message": message}
+        )
+        raise ToolInputError(code, message)
 
     @staticmethod
     def _replace_text(path: Path, content: str) -> None:

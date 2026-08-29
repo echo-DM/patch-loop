@@ -30,6 +30,7 @@ def test_no_change_task_returns_sanitized_report(cli_harness: CliHarness) -> Non
                 "max_changed_files": 20,
                 "max_diff_lines": 2000,
                 "max_wall_time_minutes": 30,
+                "max_file_bytes": 1000000,
             },
             "usage": {
                 "iterations": 0,
