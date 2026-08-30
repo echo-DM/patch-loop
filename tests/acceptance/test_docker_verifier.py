@@ -210,6 +210,27 @@ def test_check_failure_keeps_patch_and_reports_redacted_bounded_evidence(
     assert secret not in str(result.report)
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(not docker_image_available(), reason="Docker fixture image unavailable")
+@pytest.mark.parametrize("exit_code", (125, 126, 137))
+def test_special_exit_code_from_check_is_not_an_infrastructure_or_memory_failure(
+    tmp_path: Path,
+    exit_code: int,
+) -> None:
+    repository = configured_repository(tmp_path)
+    config = repository / ".patchloop.yml"
+    config.write_text(config.read_text().replace(DEFAULT_CHECK, f"exit {exit_code}"))
+
+    result = run_patch(repository)
+
+    assert result.terminal_outcome == "pr_created"
+    assert result.verification["status"] == "checks_failed"
+    check = result.verification["checks"][0]
+    assert check["exit_code"] == exit_code
+    assert check["failure_category"] == "command_failed"
+    assert result.publication["intent"] == "draft_pr"
+
+
 def test_docker_infrastructure_failure_is_distinct(tmp_path: Path) -> None:
     repository = configured_repository(tmp_path)
 
@@ -286,6 +307,7 @@ def test_check_output_limit_is_truncated_and_normalized(tmp_path: Path) -> None:
     assert check["command"] == "check-1"
     assert check["failure_category"] == "output_limit"
     assert check["output_truncated"] is True
+    assert "[REDACTED]" in check["output"]
     assert check["output"].endswith("[output truncated]")
     assert "ghp_" not in check["output"]
     assert len(check["output"].encode()) <= 84
@@ -308,6 +330,31 @@ def test_docker_applies_memory_and_process_limits(tmp_path: Path) -> None:
     assert result.terminal_outcome == "pr_created"
     assert result.verification["status"] == "checks_passed"
     assert result.verification["checks"][0]["exit_code"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not docker_image_available(), reason="Docker fixture image unavailable")
+def test_process_limit_is_detected_without_parsing_command_output(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    config = repository / ".patchloop.yml"
+    config.write_text(
+        config.read_text()
+        .replace(
+            DEFAULT_CHECK,
+            'exec 2>/dev/null; i=0; while [ "$i" -lt 64 ]; do sleep 1 & i=$((i + 1)); done; wait; exit 0',
+        )
+        .replace("pids: 32", "pids: 8")
+    )
+
+    result = run_patch(repository)
+
+    assert result.terminal_outcome == "pr_created"
+    assert result.verification["status"] == "checks_failed"
+    check = result.verification["checks"][0]
+    assert check["failure_category"] == "process_limit"
+    assert result.report["budgets"]["resource_limit_events"][0]["code"] == (
+        "verifier_process_limit"
+    )
 
 
 def run_patch(

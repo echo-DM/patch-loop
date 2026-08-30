@@ -6,7 +6,7 @@ from time import monotonic
 from typing import Callable, Literal, Mapping, NotRequired, TypedDict, cast
 
 from patchloop.adapters import (
-    CheckResult,
+    CheckResultDocument,
     EvaluationDecision,
     EvaluationTask,
     GateRejection,
@@ -19,6 +19,7 @@ from patchloop.adapters import (
     ToolResult,
     VerifierAdapter,
     VerificationResult,
+    check_result_document,
 )
 from patchloop.config import RepositoryConfig
 from patchloop.controlled_tools import (
@@ -46,17 +47,8 @@ class VerificationReport(TypedDict):
         "budget_exhausted",
     ]
     configured_checks: list[str]
-    setup: list[CommandResultReport]
-    checks: list[CommandResultReport]
-
-
-class CommandResultReport(TypedDict):
-    command: str
-    status: Literal["passed", "failed"]
-    exit_code: int
-    output: str
-    failure_category: str | None
-    output_truncated: bool
+    setup: list[CheckResultDocument]
+    checks: list[CheckResultDocument]
 
 
 class ChangedFilesReport(TypedDict):
@@ -500,8 +492,8 @@ def _run_patch(
             "message": "The final patch differs from the patch sent to the verifier.",
         }
 
-    checks: list[CommandResultReport] = []
-    setup: list[CommandResultReport] = []
+    checks: list[CheckResultDocument] = []
+    setup: list[CheckResultDocument] = []
     verification_status: Literal[
         "not_run",
         "checks_passed",
@@ -512,8 +504,8 @@ def _run_patch(
     ] = "not_run"
     if verification_result is not None:
         verification_status = verification_result.status
-        setup = [_command_result_report(result) for result in verification_result.setup]
-        checks = [_command_result_report(result) for result in verification_result.checks]
+        setup = [check_result_document(result) for result in verification_result.setup]
+        checks = [check_result_document(result) for result in verification_result.checks]
     budget_exhausted = error is not None and error["category"] == "budget"
     if budget_exhausted:
         verification_status = "budget_exhausted"
@@ -640,9 +632,9 @@ def _verification_report(
         "infrastructure_failed",
         "budget_exhausted",
     ],
-    checks: list[CommandResultReport],
+    checks: list[CheckResultDocument],
     *,
-    setup: list[CommandResultReport] | None = None,
+    setup: list[CheckResultDocument] | None = None,
 ) -> VerificationReport:
     return {
         "status": status,
@@ -652,19 +644,6 @@ def _verification_report(
         "setup": setup or [],
         "checks": checks,
     }
-
-
-def _command_result_report(result: CheckResult) -> CommandResultReport:
-    return {
-        "command": redact_text(result.command),
-        "status": result.status,
-        "exit_code": result.exit_code,
-        "output": redact_text(result.output),
-        "failure_category": result.failure_category,
-        "output_truncated": result.output_truncated,
-    }
-
-
 def _verification_limit_events(
     verification: VerificationResult | None,
 ) -> list[ReportEvent]:

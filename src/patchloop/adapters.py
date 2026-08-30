@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal, Mapping, Protocol, Sequence, TypedDict, cast
 
 from patchloop.config import RepositoryConfig, VerifierConfig
+from patchloop.sanitize import redact_text
 
 
 RepositoryPermission = Literal["admin", "write", "read", "none"]
@@ -128,6 +129,26 @@ class CheckResult:
     output: str = ""
     failure_category: CheckFailureCategory | None = None
     output_truncated: bool = False
+
+
+class CheckResultDocument(TypedDict):
+    command: str
+    status: Literal["passed", "failed"]
+    exit_code: int
+    output: str
+    failure_category: CheckFailureCategory | None
+    output_truncated: bool
+
+
+def check_result_document(result: CheckResult) -> CheckResultDocument:
+    return {
+        "command": redact_text(result.command),
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "output": redact_text(result.output),
+        "failure_category": result.failure_category,
+        "output_truncated": result.output_truncated,
+    }
 
 
 @dataclass(frozen=True)

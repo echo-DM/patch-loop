@@ -17,9 +17,11 @@ from patchloop.adapters import (
     VerificationRequest,
     VerificationResult,
     VerifierAdapter,
+    check_result_document,
 )
 from patchloop.config import BudgetConfig, VerifierConfig
 from patchloop.sanitize import redact_text
+from patchloop.verifier_policy import is_sensitive_env_name
 
 
 MAX_PATCHED_FILE_BYTES = 1_000_000
@@ -27,7 +29,6 @@ PROTECTED_PATHS = frozenset(
     {".git", ".github/workflows", ".patchloop", ".patchloop.yml"}
 )
 PROTECTED_PREFIXES = (".git/", ".github/workflows/", ".patchloop/")
-ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 
 
 def diff_line_count(content: str) -> int:
@@ -324,25 +325,11 @@ class ControlledTools:
         return {
             "status": self.latest_verification.status,
             "setup": [
-                {
-                    "command": result.command,
-                    "status": result.status,
-                    "exit_code": result.exit_code,
-                    "output": redact_text(result.output),
-                    "failure_category": result.failure_category,
-                    "output_truncated": result.output_truncated,
-                }
+                check_result_document(result)
                 for result in self.latest_verification.setup
             ],
             "checks": [
-                {
-                    "command": check.command,
-                    "status": check.status,
-                    "exit_code": check.exit_code,
-                    "output": redact_text(check.output),
-                    "failure_category": check.failure_category,
-                    "output_truncated": check.output_truncated,
-                }
+                check_result_document(check)
                 for check in self.latest_verification.checks
             ],
         }
@@ -402,12 +389,8 @@ class ControlledTools:
     @staticmethod
     def _is_protected_path(path: str) -> bool:
         name = PurePosixPath(path).name
-        sensitive_env = name == ".env" or (
-            name.startswith(".env.")
-            and not name.endswith(ENV_TEMPLATE_SUFFIXES)
-        )
         return (
-            sensitive_env
+            is_sensitive_env_name(name)
             or path in PROTECTED_PATHS
             or path.startswith(PROTECTED_PREFIXES)
         )

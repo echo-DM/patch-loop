@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -12,21 +13,46 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal
 
 from patchloop.adapters import (
-    CheckFailureCategory,
     CheckResult,
     VerificationRequest,
     VerificationResult,
 )
 from patchloop.sanitize import redact_text
+from patchloop.verifier_policy import is_sensitive_env_name
 
 
-ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
+COMMAND_WRAPPER = """\
+before=0
+if [ -r /sys/fs/cgroup/pids.events ]; then
+  while read key value; do
+    [ "$key" = max ] && before=$value
+  done < /sys/fs/cgroup/pids.events
+fi
+/bin/sh -c "$1"
+code=$?
+after=$before
+if [ -r /sys/fs/cgroup/pids.events ]; then
+  while read key value; do
+    [ "$key" = max ] && after=$value
+  done < /sys/fs/cgroup/pids.events
+fi
+if [ "$after" -gt "$before" ]; then
+  printf process_limit > /patchloop-control/resource
+fi
+exit "$code"
+"""
 
 
 @dataclass(frozen=True)
 class _CommandExecution:
     result: CheckResult
     infrastructure_failed: bool = False
+
+
+@dataclass(frozen=True)
+class _ContainerState:
+    error: str
+    oom_killed: bool
 
 
 class _BoundedOutput:
@@ -142,17 +168,11 @@ def _ignored_verifier_inputs(directory: str, names: list[str]) -> set[str]:
             name == ".git"
             or name == ".patchloop"
             or name.startswith(".patchloop-state")
-            or _is_sensitive_env_name(name)
+            or is_sensitive_env_name(name)
             or path.is_symlink()
         ):
             ignored.add(name)
     return ignored
-
-
-def _is_sensitive_env_name(name: str) -> bool:
-    return name == ".env" or (
-        name.startswith(".env.") and not name.endswith(ENV_TEMPLATE_SUFFIXES)
-    )
 
 
 def _restore_baseline(workspace: Path, request: VerificationRequest) -> None:
@@ -198,12 +218,16 @@ def _run_docker_command(
 ) -> _CommandExecution:
     limits = request.verifier.limits
     cidfile = workspace.parent / f"container-{uuid.uuid4().hex}.cid"
+    control = workspace.parent / f"control-{uuid.uuid4().hex}"
+    control.mkdir(mode=0o700)
+    resource_event = control / "resource"
     arguments = [
         executable,
         "run",
-        "--rm",
         "--cidfile",
         str(cidfile),
+        "--label",
+        "patchloop.verifier=true",
         "--memory",
         f"{limits.memory_mb}m",
         "--memory-swap",
@@ -216,12 +240,16 @@ def _run_docker_command(
         "no-new-privileges",
         "--mount",
         f"type=bind,src={workspace},dst=/workspace",
+        "--mount",
+        f"type=bind,src={control},dst=/patchloop-control",
         "--workdir",
         "/workspace",
         "--entrypoint",
         "/bin/sh",
         request.verifier.image,
         "-c",
+        COMMAND_WRAPPER,
+        "patchloop-verifier",
         command,
     ]
     try:
@@ -252,11 +280,14 @@ def _run_docker_command(
         process.kill()
     return_code = process.wait()
     reader.join(timeout=1)
+    container_state = _inspect_container(cidfile, executable)
+    process_limit_reached = resource_event.exists()
+    _remove_container(cidfile, executable)
     cidfile.unlink(missing_ok=True)
 
     was_truncated = output.total_bytes > limits.output_bytes
     if was_truncated:
-        rendered_output = "[output truncated]"
+        rendered_output = _render_truncated_output(output.content)
     else:
         rendered_output = redact_text(output.content.decode(errors="replace"))
     if termination == "timeout":
@@ -281,39 +312,53 @@ def _run_docker_command(
                 True,
             )
         )
-    if return_code == 0:
-        return _CommandExecution(
-            CheckResult(command_id, "passed", 0, rendered_output, None, was_truncated)
-        )
-    if return_code in {125, 126}:
+    if container_state is None or container_state.error:
         return _infrastructure_result(
             command_id,
             "Docker could not execute the configured verifier image.",
             output=rendered_output,
             exit_code=return_code,
         )
-    failure_category: CheckFailureCategory = (
-        "memory_limit" if return_code == 137 else "command_failed"
-    )
-    if "resource temporarily unavailable" in rendered_output.casefold():
-        failure_category = "process_limit"
+    if container_state.oom_killed:
+        return _CommandExecution(
+            CheckResult(
+                command_id,
+                "failed",
+                return_code,
+                rendered_output,
+                "memory_limit",
+                was_truncated,
+            )
+        )
+    if process_limit_reached:
+        return _CommandExecution(
+            CheckResult(
+                command_id,
+                "failed",
+                return_code,
+                rendered_output,
+                "process_limit",
+                was_truncated,
+            )
+        )
+    if return_code == 0:
+        return _CommandExecution(
+            CheckResult(command_id, "passed", 0, rendered_output, None, was_truncated)
+        )
     return _CommandExecution(
         CheckResult(
             command_id,
             "failed",
             return_code,
             rendered_output,
-            failure_category,
+            "command_failed",
             was_truncated,
         )
     )
 
 
 def _kill_container(cidfile: Path, executable: str) -> None:
-    try:
-        container_id = cidfile.read_text().strip()
-    except OSError:
-        return
+    container_id = _container_id(cidfile)
     if not container_id:
         return
     subprocess.run(
@@ -322,6 +367,62 @@ def _kill_container(cidfile: Path, executable: str) -> None:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def _inspect_container(cidfile: Path, executable: str) -> _ContainerState | None:
+    container_id = _container_id(cidfile)
+    if not container_id:
+        return None
+    try:
+        completed = subprocess.run(
+            [executable, "inspect", "--format", "{{json .State}}", container_id],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        document = json.loads(completed.stdout)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if completed.returncode != 0 or not isinstance(document, dict):
+        return None
+    error = document.get("Error")
+    oom_killed = document.get("OOMKilled")
+    if not isinstance(error, str) or not isinstance(oom_killed, bool):
+        return None
+    return _ContainerState(error=error, oom_killed=oom_killed)
+
+
+def _remove_container(cidfile: Path, executable: str) -> None:
+    container_id = _container_id(cidfile)
+    if not container_id:
+        return
+    subprocess.run(
+        [executable, "rm", "--force", container_id],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _container_id(cidfile: Path) -> str:
+    try:
+        return cidfile.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _render_truncated_output(content: bytes) -> str:
+    boundary = max(
+        content.rfind(b" "),
+        content.rfind(b"\t"),
+        content.rfind(b"\n"),
+        content.rfind(b"\r"),
+    )
+    prefix = content[: boundary + 1].decode(errors="replace").rstrip()
+    marker = "[output truncated]"
+    if not prefix:
+        return marker
+    return f"{redact_text(prefix)}\n{marker}"
 
 
 def _infrastructure_result(
