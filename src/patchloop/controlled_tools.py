@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping
 
 from patchloop.adapters import (
+    OriginalFileSnapshot,
     ReportEvent,
     ToolCall,
     ToolDefinition,
@@ -17,13 +18,16 @@ from patchloop.adapters import (
     VerificationResult,
     VerifierAdapter,
 )
-from patchloop.config import BudgetConfig
+from patchloop.config import BudgetConfig, VerifierConfig
 from patchloop.sanitize import redact_text
 
 
 MAX_PATCHED_FILE_BYTES = 1_000_000
-PROTECTED_PATHS = frozenset({".git", ".github/workflows", ".patchloop.yml"})
-PROTECTED_PREFIXES = (".git/", ".github/workflows/")
+PROTECTED_PATHS = frozenset(
+    {".git", ".github/workflows", ".patchloop", ".patchloop.yml"}
+)
+PROTECTED_PREFIXES = (".git/", ".github/workflows/", ".patchloop/")
+ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 
 
 def diff_line_count(content: str) -> int:
@@ -55,12 +59,12 @@ class ControlledTools:
     def __init__(
         self,
         repository: Path,
-        checks: tuple[str, ...],
+        verifier_config: VerifierConfig,
         budgets: BudgetConfig,
         verifier: VerifierAdapter,
     ) -> None:
         self._repository = repository.resolve()
-        self._checks = checks
+        self._verifier_config = verifier_config
         self._budgets = budgets
         self._verifier = verifier
         self._seen_call_ids: set[str] = set()
@@ -298,7 +302,15 @@ class ControlledTools:
         candidate = self.patch_bundle()
         self.verified_patch_sha256 = candidate.sha256 if candidate is not None else None
         self.latest_verification = self._verifier.verify(
-            VerificationRequest(self._repository, self._checks)
+            VerificationRequest(
+                repository=self._repository,
+                verifier=self._verifier_config,
+                patch=candidate.content if candidate is not None else "",
+                original_files=tuple(
+                    OriginalFileSnapshot(path, content)
+                    for path, content in sorted(self._original_files.items())
+                ),
+            )
         )
         self.iterations += 1
         if (
@@ -311,12 +323,25 @@ class ControlledTools:
             )
         return {
             "status": self.latest_verification.status,
+            "setup": [
+                {
+                    "command": result.command,
+                    "status": result.status,
+                    "exit_code": result.exit_code,
+                    "output": redact_text(result.output),
+                    "failure_category": result.failure_category,
+                    "output_truncated": result.output_truncated,
+                }
+                for result in self.latest_verification.setup
+            ],
             "checks": [
                 {
                     "command": check.command,
                     "status": check.status,
                     "exit_code": check.exit_code,
                     "output": redact_text(check.output),
+                    "failure_category": check.failure_category,
+                    "output_truncated": check.output_truncated,
                 }
                 for check in self.latest_verification.checks
             ],
@@ -376,7 +401,16 @@ class ControlledTools:
 
     @staticmethod
     def _is_protected_path(path: str) -> bool:
-        return path in PROTECTED_PATHS or path.startswith(PROTECTED_PREFIXES)
+        name = PurePosixPath(path).name
+        sensitive_env = name == ".env" or (
+            name.startswith(".env.")
+            and not name.endswith(ENV_TEMPLATE_SUFFIXES)
+        )
+        return (
+            sensitive_env
+            or path in PROTECTED_PATHS
+            or path.startswith(PROTECTED_PREFIXES)
+        )
 
     def _exhaust_budget(self, code: str, message: str) -> None:
         self._record_budget_exhaustion(code, message)

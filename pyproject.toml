@@ -27,6 +27,9 @@ packages = ["src/patchloop"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "integration: exercises a real external runtime such as Docker",
+]
 
 [tool.mypy]
 python_version = "3.12"

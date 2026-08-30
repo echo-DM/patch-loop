@@ -5,11 +5,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Mapping, Protocol, Sequence, TypedDict, cast
 
-from patchloop.config import RepositoryConfig
+from patchloop.config import RepositoryConfig, VerifierConfig
 
 
 RepositoryPermission = Literal["admin", "write", "read", "none"]
 TerminalOutcome = Literal["pr_created", "needs_clarification", "no_change", "failed"]
+CheckFailureCategory = Literal[
+    "command_failed",
+    "timeout",
+    "memory_limit",
+    "process_limit",
+    "output_limit",
+    "infrastructure",
+]
 WRITE_PERMISSIONS: frozenset[RepositoryPermission] = frozenset({"admin", "write"})
 
 
@@ -118,12 +126,17 @@ class CheckResult:
     status: Literal["passed", "failed"]
     exit_code: int
     output: str = ""
+    failure_category: CheckFailureCategory | None = None
+    output_truncated: bool = False
 
 
 @dataclass(frozen=True)
 class VerificationResult:
-    status: Literal["checks_passed", "checks_failed"]
+    status: Literal[
+        "checks_passed", "checks_failed", "setup_failed", "infrastructure_failed"
+    ]
     checks: tuple[CheckResult, ...]
+    setup: tuple[CheckResult, ...] = ()
 
     @classmethod
     def passed(cls, commands: Sequence[str]) -> VerificationResult:
@@ -134,9 +147,21 @@ class VerificationResult:
 
 
 @dataclass(frozen=True)
+class OriginalFileSnapshot:
+    path: str
+    content: bytes | None
+
+
+@dataclass(frozen=True)
 class VerificationRequest:
     repository: Path
-    checks: tuple[str, ...]
+    verifier: VerifierConfig
+    patch: str
+    original_files: tuple[OriginalFileSnapshot, ...]
+
+    @property
+    def checks(self) -> tuple[str, ...]:
+        return self.verifier.checks
 
 
 class VerifierAdapter(Protocol):

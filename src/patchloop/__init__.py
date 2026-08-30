@@ -16,6 +16,7 @@ from patchloop.core import (
     TaskSnapshot,
     run,
 )
+from patchloop.docker_verifier import DockerVerifierAdapter
 
 __all__ = [
     "GitHubEventTask",
@@ -23,6 +24,7 @@ __all__ = [
     "DeterministicPatchModelAdapter",
     "DeterministicModelAdapter",
     "DeterministicVerifierAdapter",
+    "DockerVerifierAdapter",
     "RepositoryConfig",
     "RunAdapters",
     "RunRequest",

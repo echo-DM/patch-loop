@@ -21,6 +21,7 @@ def test_no_change_task_returns_sanitized_report(cli_harness: CliHarness) -> Non
         "verification": {
             "status": "not_run",
             "configured_checks": ["uv run pytest"],
+            "setup": [],
             "checks": [],
         },
         "budgets": {

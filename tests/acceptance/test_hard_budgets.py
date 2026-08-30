@@ -456,9 +456,15 @@ version: 1
 model: deterministic
 verifier:
   image: fixture
-  setup: []
+  setup:
+    - prepare fixture
   checks:
     - check fixture
+  limits:
+    timeout_seconds: 300
+    memory_mb: 512
+    pids: 64
+    output_bytes: 65536
 budgets:
   max_iterations: {max_iterations}
   max_tool_calls: {max_tool_calls}

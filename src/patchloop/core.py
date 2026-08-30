@@ -6,6 +6,7 @@ from time import monotonic
 from typing import Callable, Literal, Mapping, NotRequired, TypedDict, cast
 
 from patchloop.adapters import (
+    CheckResult,
     EvaluationDecision,
     EvaluationTask,
     GateRejection,
@@ -17,6 +18,7 @@ from patchloop.adapters import (
     TerminalOutcome,
     ToolResult,
     VerifierAdapter,
+    VerificationResult,
 )
 from patchloop.config import RepositoryConfig
 from patchloop.controlled_tools import (
@@ -36,10 +38,25 @@ MAX_CLARIFICATION_QUESTION_CHARS = 240
 
 class VerificationReport(TypedDict):
     status: Literal[
-        "not_run", "checks_passed", "checks_failed", "budget_exhausted"
+        "not_run",
+        "checks_passed",
+        "checks_failed",
+        "setup_failed",
+        "infrastructure_failed",
+        "budget_exhausted",
     ]
     configured_checks: list[str]
-    checks: list[object]
+    setup: list[CommandResultReport]
+    checks: list[CommandResultReport]
+
+
+class CommandResultReport(TypedDict):
+    command: str
+    status: Literal["passed", "failed"]
+    exit_code: int
+    output: str
+    failure_category: str | None
+    output_truncated: bool
 
 
 class ChangedFilesReport(TypedDict):
@@ -355,7 +372,7 @@ def _run_patch(
     clock: Callable[[], float],
     started_at: float,
 ) -> RunResult:
-    tools = ControlledTools(repository, config.verifier.checks, config.budgets, verifier)
+    tools = ControlledTools(repository, config.verifier, config.budgets, verifier)
     elapsed_seconds = 0.0
 
     def check_wall_time() -> ReportEvent | None:
@@ -458,6 +475,19 @@ def _run_patch(
             "code": "checks_not_requested",
             "message": "A generated patch must be checked through the verifier adapter.",
         }
+    if verification_result is not None and error is None:
+        if verification_result.status == "setup_failed":
+            error = {
+                "category": "configuration",
+                "code": "verifier_setup_failed",
+                "message": "The configured verifier setup did not complete successfully.",
+            }
+        elif verification_result.status == "infrastructure_failed":
+            error = {
+                "category": "infrastructure",
+                "code": "verifier_infrastructure_failed",
+                "message": "Docker could not complete the verifier run.",
+            }
     if (
         verification_result is not None
         and patch is not None
@@ -470,25 +500,24 @@ def _run_patch(
             "message": "The final patch differs from the patch sent to the verifier.",
         }
 
-    checks: list[object] = []
+    checks: list[CommandResultReport] = []
+    setup: list[CommandResultReport] = []
     verification_status: Literal[
-        "not_run", "checks_passed", "checks_failed", "budget_exhausted"
+        "not_run",
+        "checks_passed",
+        "checks_failed",
+        "setup_failed",
+        "infrastructure_failed",
+        "budget_exhausted",
     ] = "not_run"
     if verification_result is not None:
         verification_status = verification_result.status
-        checks = [
-            {
-                "command": redact_text(check.command),
-                "status": check.status,
-                "exit_code": check.exit_code,
-                "output": redact_text(check.output),
-            }
-            for check in verification_result.checks
-        ]
+        setup = [_command_result_report(result) for result in verification_result.setup]
+        checks = [_command_result_report(result) for result in verification_result.checks]
     budget_exhausted = error is not None and error["category"] == "budget"
     if budget_exhausted:
         verification_status = "budget_exhausted"
-    verification = _verification_report(config, verification_status, checks)
+    verification = _verification_report(config, verification_status, checks, setup=setup)
     changed_paths = list(patch.changed_files) if patch is not None else []
     changed_files: ChangedFilesReport = {
         "count": len(changed_paths),
@@ -504,6 +533,7 @@ def _run_patch(
             "wall_time_minutes": int(elapsed_seconds // 60),
         },
         "resource_limit_events": list(tools.policy_events)
+        + _verification_limit_events(verification_result)
         + ([error] if budget_exhausted and error not in tools.policy_events else []),
     }
     if error is None or (budget_exhausted and patch is not None):
@@ -603,17 +633,65 @@ def _budget_limits(config: RepositoryConfig) -> BudgetLimitsReport:
 def _verification_report(
     config: RepositoryConfig,
     status: Literal[
-        "not_run", "checks_passed", "checks_failed", "budget_exhausted"
+        "not_run",
+        "checks_passed",
+        "checks_failed",
+        "setup_failed",
+        "infrastructure_failed",
+        "budget_exhausted",
     ],
-    checks: list[object],
+    checks: list[CommandResultReport],
+    *,
+    setup: list[CommandResultReport] | None = None,
 ) -> VerificationReport:
     return {
         "status": status,
         "configured_checks": [
             redact_text(command) for command in config.verifier.checks
         ],
+        "setup": setup or [],
         "checks": checks,
     }
+
+
+def _command_result_report(result: CheckResult) -> CommandResultReport:
+    return {
+        "command": redact_text(result.command),
+        "status": result.status,
+        "exit_code": result.exit_code,
+        "output": redact_text(result.output),
+        "failure_category": result.failure_category,
+        "output_truncated": result.output_truncated,
+    }
+
+
+def _verification_limit_events(
+    verification: VerificationResult | None,
+) -> list[ReportEvent]:
+    if verification is None:
+        return []
+    messages = {
+        "timeout": "timeout",
+        "memory_limit": "memory",
+        "process_limit": "process",
+        "output_limit": "output",
+    }
+    events: list[ReportEvent] = []
+    for result in (*verification.setup, *verification.checks):
+        if result.failure_category not in messages:
+            continue
+        limit = messages[result.failure_category]
+        events.append(
+            {
+                "category": "resource",
+                "code": f"verifier_{result.failure_category}",
+                "message": (
+                    f"Verifier command {redact_text(result.command)} reached its "
+                    f"{limit} limit."
+                ),
+            }
+        )
+    return events
 
 
 def _sanitize_evaluation_task(task: EvaluationTask) -> EvaluationTask:
