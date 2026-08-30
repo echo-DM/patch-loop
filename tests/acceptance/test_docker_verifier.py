@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -355,6 +356,66 @@ def test_process_limit_is_detected_without_parsing_command_output(tmp_path: Path
     assert result.report["budgets"]["resource_limit_events"][0]["code"] == (
         "verifier_process_limit"
     )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not docker_image_available(), reason="Docker fixture image unavailable")
+def test_process_limit_event_file_is_writable_by_non_root_images(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    config = repository / ".patchloop.yml"
+    config.write_text(
+        config.read_text().replace(
+            DEFAULT_CHECK,
+            'test "$(stat -c %a /patchloop-control/resource)" = 666',
+        )
+    )
+
+    result = run_patch(repository)
+
+    assert result.terminal_outcome == "pr_created"
+    assert result.verification["status"] == "checks_passed"
+
+
+def test_stalled_docker_control_commands_have_a_bounded_timeout(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    executable = tmp_path / "fake-docker"
+    executable.write_text(
+        """#!/bin/sh
+case "$1" in
+  run)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --cidfile ]; then
+        shift
+        printf fake-container > "$1"
+        break
+      fi
+      shift
+    done
+    exit 0
+    ;;
+  inspect|rm|kill)
+    sleep 3
+    exit 1
+    ;;
+esac
+"""
+    )
+    executable.chmod(0o755)
+
+    started_at = time.monotonic()
+    result = run_patch(
+        repository,
+        verifier=DockerVerifierAdapter(executable=str(executable)),
+    )
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 5
+    assert result.terminal_outcome == "failed"
+    assert result.verification["status"] == "infrastructure_failed"
 
 
 def run_patch(

@@ -55,6 +55,64 @@ class _ContainerState:
     oom_killed: bool
 
 
+@dataclass(frozen=True)
+class _ContainerHandle:
+    executable: str
+    cidfile: Path
+    timeout_seconds: float
+
+    @property
+    def container_id(self) -> str:
+        try:
+            return self.cidfile.read_text().strip()
+        except OSError:
+            return ""
+
+    def kill(self) -> bool:
+        return self._control("kill")
+
+    def remove(self) -> bool:
+        return self._control("rm", "--force")
+
+    def inspect(self) -> _ContainerState | None:
+        completed = self._run("inspect", "--format", "{{json .State}}")
+        if completed is None or completed.returncode != 0:
+            return None
+        try:
+            document = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(document, dict):
+            return None
+        error = document.get("Error")
+        oom_killed = document.get("OOMKilled")
+        if not isinstance(error, str) or not isinstance(oom_killed, bool):
+            return None
+        return _ContainerState(error=error, oom_killed=oom_killed)
+
+    def _control(self, action: str, *arguments: str) -> bool:
+        if not self.container_id:
+            return True
+        completed = self._run(action, *arguments)
+        return completed is not None and completed.returncode == 0
+
+    def _run(
+        self, action: str, *arguments: str
+    ) -> subprocess.CompletedProcess[str] | None:
+        if not self.container_id:
+            return None
+        try:
+            return subprocess.run(
+                [self.executable, action, *arguments, self.container_id],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+
 class _BoundedOutput:
     def __init__(self, limit: int) -> None:
         self._limit = limit
@@ -219,8 +277,16 @@ def _run_docker_command(
     limits = request.verifier.limits
     cidfile = workspace.parent / f"container-{uuid.uuid4().hex}.cid"
     control = workspace.parent / f"control-{uuid.uuid4().hex}"
-    control.mkdir(mode=0o700)
+    control.mkdir(mode=0o755)
+    os.chmod(control, 0o755)
     resource_event = control / "resource"
+    resource_event.touch()
+    os.chmod(resource_event, 0o666)
+    container = _ContainerHandle(
+        executable,
+        cidfile,
+        timeout_seconds=min(1.0, float(limits.timeout_seconds)),
+    )
     arguments = [
         executable,
         "run",
@@ -275,14 +341,15 @@ def _run_docker_command(
             termination = "timeout"
             break
         time.sleep(0.01)
+    control_failed = False
     if termination is not None:
-        _kill_container(cidfile, executable)
+        control_failed = not container.kill()
         process.kill()
     return_code = process.wait()
     reader.join(timeout=1)
-    container_state = _inspect_container(cidfile, executable)
-    process_limit_reached = resource_event.exists()
-    _remove_container(cidfile, executable)
+    container_state = container.inspect()
+    process_limit_reached = _process_limit_reached(resource_event)
+    control_failed = not container.remove() or control_failed
     cidfile.unlink(missing_ok=True)
 
     was_truncated = output.total_bytes > limits.output_bytes
@@ -290,6 +357,13 @@ def _run_docker_command(
         rendered_output = _render_truncated_output(output.content)
     else:
         rendered_output = redact_text(output.content.decode(errors="replace"))
+    if control_failed:
+        return _infrastructure_result(
+            command_id,
+            "Docker could not clean up the verifier container.",
+            output=rendered_output,
+            exit_code=return_code,
+        )
     if termination == "timeout":
         return _CommandExecution(
             CheckResult(
@@ -357,60 +431,6 @@ def _run_docker_command(
     )
 
 
-def _kill_container(cidfile: Path, executable: str) -> None:
-    container_id = _container_id(cidfile)
-    if not container_id:
-        return
-    subprocess.run(
-        [executable, "kill", container_id],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def _inspect_container(cidfile: Path, executable: str) -> _ContainerState | None:
-    container_id = _container_id(cidfile)
-    if not container_id:
-        return None
-    try:
-        completed = subprocess.run(
-            [executable, "inspect", "--format", "{{json .State}}", container_id],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        document = json.loads(completed.stdout)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if completed.returncode != 0 or not isinstance(document, dict):
-        return None
-    error = document.get("Error")
-    oom_killed = document.get("OOMKilled")
-    if not isinstance(error, str) or not isinstance(oom_killed, bool):
-        return None
-    return _ContainerState(error=error, oom_killed=oom_killed)
-
-
-def _remove_container(cidfile: Path, executable: str) -> None:
-    container_id = _container_id(cidfile)
-    if not container_id:
-        return
-    subprocess.run(
-        [executable, "rm", "--force", container_id],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def _container_id(cidfile: Path) -> str:
-    try:
-        return cidfile.read_text().strip()
-    except OSError:
-        return ""
-
-
 def _render_truncated_output(content: bytes) -> str:
     boundary = max(
         content.rfind(b" "),
@@ -423,6 +443,13 @@ def _render_truncated_output(content: bytes) -> str:
     if not prefix:
         return marker
     return f"{redact_text(prefix)}\n{marker}"
+
+
+def _process_limit_reached(resource_event: Path) -> bool:
+    try:
+        return resource_event.read_text() == "process_limit"
+    except OSError:
+        return False
 
 
 def _infrastructure_result(
