@@ -72,6 +72,7 @@ class ControlledTools:
         self._original_files: dict[str, bytes | None] = {}
         self.latest_verification: VerificationResult | None = None
         self.verified_patch_sha256: str | None = None
+        self.verification_attempts: list[tuple[str | None, VerificationResult]] = []
         self.iterations = 0
         self._exhaustion_event: ReportEvent | None = None
         self.policy_events: list[ReportEvent] = []
@@ -313,6 +314,9 @@ class ControlledTools:
                 ),
             )
         )
+        self.verification_attempts.append(
+            (self.verified_patch_sha256, self.latest_verification)
+        )
         self.iterations += 1
         if (
             self.iterations >= self._budgets.max_iterations
@@ -325,11 +329,17 @@ class ControlledTools:
         return {
             "status": self.latest_verification.status,
             "setup": [
-                check_result_document(result)
+                check_result_document(
+                    result,
+                    max_output_bytes=self._verifier_config.limits.output_bytes,
+                )
                 for result in self.latest_verification.setup
             ],
             "checks": [
-                check_result_document(check)
+                check_result_document(
+                    check,
+                    max_output_bytes=self._verifier_config.limits.output_bytes,
+                )
                 for check in self.latest_verification.checks
             ],
         }

@@ -49,6 +49,17 @@ class VerificationReport(TypedDict):
     configured_checks: list[str]
     setup: list[CheckResultDocument]
     checks: list[CheckResultDocument]
+    attempts: list[VerificationAttemptReport]
+
+
+class VerificationAttemptReport(TypedDict):
+    iteration: int
+    patch_sha256: str | None
+    status: Literal[
+        "checks_passed", "checks_failed", "setup_failed", "infrastructure_failed"
+    ]
+    setup: list[CheckResultDocument]
+    checks: list[CheckResultDocument]
 
 
 class ChangedFilesReport(TypedDict):
@@ -433,10 +444,15 @@ def _run_patch(
                     "message": "The configured controlled-tool call limit was reached.",
                 }
                 break
-            next_observations.append(tools.execute(call))
+            tool_result = tools.execute(call)
+            next_observations.append(tool_result)
             tool_calls += 1
             if (error := check_wall_time()) is not None:
                 break
+            if call.name == "run_checks" and tool_result.ok:
+                error = _verifier_interruption(tools.latest_verification)
+                if error is not None:
+                    break
             if tools.exhaustion_event is not None:
                 error = tools.exhaustion_event
                 break
@@ -468,18 +484,7 @@ def _run_patch(
             "message": "A generated patch must be checked through the verifier adapter.",
         }
     if verification_result is not None and error is None:
-        if verification_result.status == "setup_failed":
-            error = {
-                "category": "configuration",
-                "code": "verifier_setup_failed",
-                "message": "The configured verifier setup did not complete successfully.",
-            }
-        elif verification_result.status == "infrastructure_failed":
-            error = {
-                "category": "infrastructure",
-                "code": "verifier_infrastructure_failed",
-                "message": "Docker could not complete the verifier run.",
-            }
+        error = _verifier_interruption(verification_result)
     if (
         verification_result is not None
         and patch is not None
@@ -504,12 +509,28 @@ def _run_patch(
     ] = "not_run"
     if verification_result is not None:
         verification_status = verification_result.status
-        setup = [check_result_document(result) for result in verification_result.setup]
-        checks = [check_result_document(result) for result in verification_result.checks]
+        setup = [
+            check_result_document(
+                result, max_output_bytes=config.verifier.limits.output_bytes
+            )
+            for result in verification_result.setup
+        ]
+        checks = [
+            check_result_document(
+                result, max_output_bytes=config.verifier.limits.output_bytes
+            )
+            for result in verification_result.checks
+        ]
     budget_exhausted = error is not None and error["category"] == "budget"
     if budget_exhausted:
         verification_status = "budget_exhausted"
-    verification = _verification_report(config, verification_status, checks, setup=setup)
+    verification = _verification_report(
+        config,
+        verification_status,
+        checks,
+        setup=setup,
+        attempts=_verification_attempt_reports(tools.verification_attempts, config),
+    )
     changed_paths = list(patch.changed_files) if patch is not None else []
     changed_files: ChangedFilesReport = {
         "count": len(changed_paths),
@@ -594,6 +615,26 @@ def _wall_time_limit_error() -> ReportEvent:
     }
 
 
+def _verifier_interruption(
+    verification: VerificationResult | None,
+) -> ReportEvent | None:
+    if verification is None:
+        return None
+    if verification.status == "setup_failed":
+        return {
+            "category": "configuration",
+            "code": "verifier_setup_failed",
+            "message": "The configured verifier setup did not complete successfully.",
+        }
+    if verification.status == "infrastructure_failed":
+        return {
+            "category": "infrastructure",
+            "code": "verifier_infrastructure_failed",
+            "message": "Docker could not complete the verifier run.",
+        }
+    return None
+
+
 def _wall_time_failure(
     task_id: str, config: RepositoryConfig, elapsed_seconds: float
 ) -> RunResult:
@@ -635,6 +676,7 @@ def _verification_report(
     checks: list[CheckResultDocument],
     *,
     setup: list[CheckResultDocument] | None = None,
+    attempts: list[VerificationAttemptReport] | None = None,
 ) -> VerificationReport:
     return {
         "status": status,
@@ -643,7 +685,33 @@ def _verification_report(
         ],
         "setup": setup or [],
         "checks": checks,
+        "attempts": attempts or [],
     }
+
+
+def _verification_attempt_reports(
+    attempts: list[tuple[str | None, VerificationResult]],
+    config: RepositoryConfig,
+) -> list[VerificationAttemptReport]:
+    max_output_bytes = config.verifier.limits.output_bytes
+    return [
+        {
+            "iteration": iteration,
+            "patch_sha256": patch_sha256,
+            "status": result.status,
+            "setup": [
+                check_result_document(item, max_output_bytes=max_output_bytes)
+                for item in result.setup
+            ],
+            "checks": [
+                check_result_document(item, max_output_bytes=max_output_bytes)
+                for item in result.checks
+            ],
+        }
+        for iteration, (patch_sha256, result) in enumerate(attempts, start=1)
+    ]
+
+
 def _verification_limit_events(
     verification: VerificationResult | None,
 ) -> list[ReportEvent]:

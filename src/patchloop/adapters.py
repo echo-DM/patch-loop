@@ -140,15 +140,30 @@ class CheckResultDocument(TypedDict):
     output_truncated: bool
 
 
-def check_result_document(result: CheckResult) -> CheckResultDocument:
+def check_result_document(
+    result: CheckResult, *, max_output_bytes: int | None = None
+) -> CheckResultDocument:
+    output = redact_text(result.output)
+    output_truncated = result.output_truncated
+    if max_output_bytes is not None and len(output.encode()) > max_output_bytes:
+        output = _truncate_output(output, max_output_bytes)
+        output_truncated = True
     return {
         "command": redact_text(result.command),
         "status": result.status,
         "exit_code": result.exit_code,
-        "output": redact_text(result.output),
+        "output": output,
         "failure_category": result.failure_category,
-        "output_truncated": result.output_truncated,
+        "output_truncated": output_truncated,
     }
+
+
+def _truncate_output(output: str, max_bytes: int) -> str:
+    marker = b"[output truncated]"
+    if max_bytes <= len(marker):
+        return marker[:max_bytes].decode()
+    prefix = output.encode()[: max_bytes - len(marker)].decode(errors="ignore")
+    return prefix + marker.decode()
 
 
 @dataclass(frozen=True)
