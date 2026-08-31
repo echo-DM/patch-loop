@@ -240,29 +240,18 @@ def test_configured_model_must_match_the_model_that_will_execute(
     client = FakeGeminiClient([FakeResponse(content="This must not execute.")])
 
     with pytest.raises(ConfigError) as error:
-        run(
-            RunRequest(
-                task=TaskSnapshot("issue-108", "Update greeting", "Change README."),
-                repository=repository,
-                config=load_repository_config(repository / ".patchloop.yml"),
-                adapters=RunAdapters(
-                    model=GeminiPatchModelAdapter(
-                        model_name="different-model",
-                        api_key="AIzaSyDedicatedPatchLoopKey123456789",
-                        client=client,
-                    ),
-                    verifier=DeterministicVerifierAdapter(
-                        VerificationResult.passed(("check greeting",))
-                    ),
-                ),
-            )
-        )
+        run_gemini(repository, client, model_name="different-model")
 
     assert error.value.code == "model_config_mismatch"
     assert client.requests == []
 
 
-def run_gemini(repository: Path, client: FakeGeminiClient):
+def run_gemini(
+    repository: Path,
+    client: FakeGeminiClient,
+    *,
+    model_name: str = "gemma-4-31b-it",
+):
     return run(
         RunRequest(
             task=TaskSnapshot("issue-108", "Update greeting", "Change the README."),
@@ -270,7 +259,7 @@ def run_gemini(repository: Path, client: FakeGeminiClient):
             config=load_repository_config(repository / ".patchloop.yml"),
             adapters=RunAdapters(
                 model=GeminiPatchModelAdapter(
-                    model_name="gemma-4-31b-it",
+                    model_name=model_name,
                     api_key="AIzaSyDedicatedPatchLoopKey123456789",
                     client=client,
                 ),
