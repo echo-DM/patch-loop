@@ -5,8 +5,9 @@ on:
     types: [labeled]
 
 permissions:
-  contents: read
-  issues: read
+  contents: write
+  issues: write
+  pull-requests: write
 
 concurrency:
   group: patchloop-${{ github.repository }}-${{ github.event.issue.number }}

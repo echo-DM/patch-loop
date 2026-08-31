@@ -14,8 +14,13 @@ from patchloop.sanitize import redact_text
 
 
 ARTIFACT_VERSION = "1"
-RUN_PAYLOADS = {"patch.diff", "publication-intent.json", "run-report.json"}
-GATE_PAYLOADS = {"gate-report.json", "task.json"}
+RUN_PAYLOADS = {
+    "patch.diff",
+    "publication-context.json",
+    "publication-intent.json",
+    "run-report.json",
+}
+GATE_PAYLOADS = {"gate-report.json", "publication-context.json", "task.json"}
 
 
 class ArtifactFileMetadata(TypedDict):
@@ -50,6 +55,14 @@ class GateReportDocument(TypedDict):
     task_id: str
     code: str
     message: str
+
+
+class PublicationContextDocument(TypedDict):
+    context_version: Literal["1"]
+    task_id: str
+    repository: str
+    issue_number: int
+    base_branch: str
 
 
 class ArtifactIntegrityError(ValueError):
@@ -176,8 +189,15 @@ def verify_artifact(
                 raise ArtifactIntegrityError("Patch payload is not UTF-8 text.") from error
     _verify_result_consistency(verified)
     if summary is not None:
-        _append_summary(summary, cast(dict[str, object], verified["run-report.json"]))
+        append_run_summary(
+            summary, cast(dict[str, object], verified["run-report.json"])
+        )
     return verified
+
+
+def append_run_summary(path: Path, report: Mapping[str, object]) -> None:
+    """Append only the bounded, validated fields allowed in a workflow summary."""
+    _append_summary(path, report)
 
 
 def load_frozen_task(path: Path) -> EvaluationTask:
@@ -199,6 +219,37 @@ def load_frozen_task(path: Path) -> EvaluationTask:
         authorized_by=_required_string(document, "authorized_by"),
         supplemental_requirements=_load_comments(document, "supplemental_requirements"),
         reference_material=_load_comments(document, "reference_material"),
+    )
+
+
+def load_publication_context(path: Path) -> PublicationContextDocument | None:
+    manifest = path.parent / "manifest.json"
+    if not manifest.exists():
+        return None
+    payloads = _verified_payload_bytes(path.parent, GATE_PAYLOADS)
+    try:
+        document = _json_bytes_mapping(
+            payloads["publication-context.json"], "publication-context.json"
+        )
+    except KeyError as error:
+        raise ArtifactIntegrityError(
+            "Authorized Gate artifact has no publication context."
+        ) from error
+    if document.get("context_version") != "1":
+        raise ArtifactIntegrityError("Unsupported publication context version.")
+    issue_number = document.get("issue_number")
+    if (
+        isinstance(issue_number, bool)
+        or not isinstance(issue_number, int)
+        or issue_number <= 0
+    ):
+        raise ArtifactIntegrityError("Publication context Issue number is invalid.")
+    return PublicationContextDocument(
+        context_version="1",
+        task_id=_required_string(document, "task_id"),
+        repository=_required_string(document, "repository"),
+        issue_number=issue_number,
+        base_branch=_required_string(document, "base_branch"),
     )
 
 

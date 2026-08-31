@@ -79,7 +79,9 @@ def test_reusable_workflow_declares_explicit_inputs_secret_and_job_boundaries() 
         "contents": "read"
     }
     assert cast(dict[str, object], jobs["publish"])["permissions"] == {
-        "contents": "read"
+        "contents": "write",
+        "issues": "write",
+        "pull-requests": "write",
     }
     assert cast(dict[str, object], jobs["agent"])["if"] == (
         "needs.gate.outputs.authorized == 'true'"
@@ -103,9 +105,9 @@ def test_secret_and_artifacts_follow_only_the_declared_job_path() -> None:
     assert raw_workflow.count("${{ job.workflow_repository }}") == 3
     assert raw_workflow.count("${{ job.workflow_sha }}") == 3
     assert "github.workflow_ref" not in raw_workflow
-    assert "pull-requests: write" not in raw_workflow
-    assert "issues: write" not in raw_workflow
-    assert "contents: write" not in raw_workflow
+    assert raw_workflow.count("pull-requests: write") == 1
+    assert raw_workflow.count("issues: write") == 1
+    assert raw_workflow.count("contents: write") == 1
 
     gate_steps = cast(list[dict[str, object]], gate["steps"])
     agent_steps = cast(list[dict[str, object]], agent["steps"])
@@ -128,6 +130,13 @@ def test_secret_and_artifacts_follow_only_the_declared_job_path() -> None:
     assert "PATCHLOOP_GEMINI_API_KEY" not in publish_text
     assert "Docker" not in publish_text
     assert ".patchloop.yml" not in publish_text
+    assert "patchloop.workflow publish" in publish_text
+    assert "github.token" in publish_text
+    assert "github.repository" in publish_text
+    assert "github.event.issue.number" in publish_text
+    assert "github.event.repository.default_branch" in publish_text
+    assert "git push" not in publish_text
+    assert "run_checks" not in publish_text
 
 
 def test_minimal_caller_filters_the_label_and_serializes_runs_per_issue() -> None:
@@ -137,6 +146,11 @@ def test_minimal_caller_filters_the_label_and_serializes_runs_per_issue() -> Non
     assert caller["concurrency"] == {
         "group": "patchloop-${{ github.repository }}-${{ github.event.issue.number }}",
         "cancel-in-progress": "false",
+    }
+    assert caller["permissions"] == {
+        "contents": "write",
+        "issues": "write",
+        "pull-requests": "write",
     }
 
     jobs = cast(dict[str, object], caller["jobs"])
@@ -174,6 +188,17 @@ def test_gate_freezes_only_an_authorized_issue_for_the_agent(tmp_path: Path) -> 
     assert task["id"] == "github:octo-org/example#42"
     assert task["authorized_by"] == "maintainer"
     assert "sender" not in task
+    context = cast(
+        dict[str, object],
+        json.loads(output.joinpath("publication-context.json").read_text()),
+    )
+    assert context == {
+        "base_branch": "main",
+        "context_version": "1",
+        "issue_number": 42,
+        "repository": "octo-org/example",
+        "task_id": "github:octo-org/example#42",
+    }
     assert output.joinpath("manifest.json").is_file()
 
 
@@ -229,19 +254,18 @@ def test_agent_emits_an_integrity_protected_patch_report_and_intent(
     tmp_path: Path,
 ) -> None:
     repository = configured_repository(tmp_path)
-    task = tmp_path / "task.json"
-    task.write_text(
-        """{
-  "task_version": "1",
-  "id": "github:octo-org/example#42",
-  "title": "Update greeting",
-  "body": "Change the greeting.",
-  "authorized_by": "maintainer",
-  "supplemental_requirements": [],
-  "reference_material": []
-}
-"""
+    event = cast(
+        dict[str, object],
+        json.loads(ROOT.joinpath("tests/fixtures/github/labeled_issue.json").read_text()),
     )
+    gate = tmp_path / "gate"
+    run_gate(
+        event=event,
+        client=FixtureGitHubClient("write"),
+        output=gate,
+        github_output=tmp_path / "github-output",
+    )
+    task = gate / "task.json"
     output = tmp_path / "result"
     model = DeterministicPatchModelAdapter(
         [
@@ -272,6 +296,7 @@ def test_agent_emits_an_integrity_protected_patch_report_and_intent(
     verified = verify_artifact(output)
     assert set(verified) == {
         "patch.diff",
+        "publication-context.json",
         "publication-intent.json",
         "run-report.json",
     }

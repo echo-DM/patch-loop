@@ -1,7 +1,7 @@
 {
   "action": "labeled",
   "label": {"name": "patchloop"},
-  "repository": {"full_name": "octo-org/example"},
+  "repository": {"full_name": "octo-org/example", "default_branch": "main"},
   "sender": {"login": "maintainer"},
   "issue": {
     "number": 42,

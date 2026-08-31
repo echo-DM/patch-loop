@@ -23,14 +23,17 @@ from patchloop.docker_verifier import DockerVerifierAdapter
 from patchloop.errors import ConfigError, InfrastructureError, PatchLoopError, TaskError
 from patchloop.gemini import GeminiPatchModelAdapter
 from patchloop.github_api import GitHubApiClient
+from patchloop.github_publish import run_publish
 from patchloop.sanitize import redact_text
 from patchloop.workflow_artifacts import (
     ArtifactIntegrityError,
     FrozenCommentDocument,
     FrozenTaskDocument,
     GateReportDocument,
+    PublicationContextDocument,
     json_bytes,
     load_frozen_task,
+    load_publication_context,
     verify_artifact,
     write_agent_failure_artifact,
     write_artifact,
@@ -46,8 +49,11 @@ def run_gate(
     summary: Path | None = None,
 ) -> bool:
     """Authorize an Issue event and freeze the task before any Agent starts."""
+    publication_context: PublicationContextDocument | None = None
     try:
         resolution = GitHubIssueAdapter(client).resolve(event)
+        if not isinstance(resolution, GateRejection):
+            publication_context = _publication_context(event, resolution.id)
     except Exception:
         resolution = GateRejection(
             task_id="github-event",
@@ -67,6 +73,7 @@ def run_gate(
         payloads = {"gate-report.json": json_bytes(gate_report)}
     else:
         authorized = True
+        assert publication_context is not None
         gate_report = GateReportDocument(
             gate_version="1",
             authorized=True,
@@ -91,6 +98,7 @@ def run_gate(
         )
         payloads = {
             "gate-report.json": json_bytes(gate_report),
+            "publication-context.json": json_bytes(publication_context),
             "task.json": json_bytes(task),
         }
     write_artifact(output, payloads)
@@ -104,6 +112,36 @@ def run_gate(
                 f"- Code: {gate_report['code']}\n"
             )
     return authorized
+
+
+def _publication_context(
+    event: Mapping[str, object], task_id: str
+) -> PublicationContextDocument:
+    repository = event.get("repository")
+    issue = event.get("issue")
+    if not isinstance(repository, dict) or not isinstance(issue, dict):
+        raise ValueError("GitHub publication context is invalid.")
+    repository_document = cast(dict[str, object], repository)
+    issue_document = cast(dict[str, object], issue)
+    full_name = repository_document.get("full_name")
+    base_branch = repository_document.get("default_branch")
+    issue_number = issue_document.get("number")
+    if (
+        not isinstance(full_name, str)
+        or not isinstance(base_branch, str)
+        or not base_branch
+        or isinstance(issue_number, bool)
+        or not isinstance(issue_number, int)
+        or issue_number <= 0
+    ):
+        raise ValueError("GitHub publication context is invalid.")
+    return PublicationContextDocument(
+        context_version="1",
+        task_id=task_id,
+        repository=full_name,
+        issue_number=issue_number,
+        base_branch=base_branch,
+    )
 
 
 def _comment_document(comment: IssueComment) -> FrozenCommentDocument:
@@ -124,7 +162,9 @@ def run_agent(
     verifier: VerifierAdapter | None = None,
 ) -> RunResult:
     """Run the public core seam and emit the Agent-to-Publish artifact."""
-    task, config = _load_agent_inputs(task_path, repository, config_path)
+    task, config, publication_context = _load_agent_inputs(
+        task_path, repository, config_path
+    )
     selected_model = model or GeminiPatchModelAdapter.from_environment(config.model)
     return _run_loaded_agent(
         task=task,
@@ -133,15 +173,19 @@ def run_agent(
         output=output,
         model=selected_model,
         verifier=verifier or DockerVerifierAdapter(),
+        publication_context=publication_context,
     )
 
 
 def _load_agent_inputs(
     task_path: Path, repository: Path, config_path: str
-) -> tuple[EvaluationTask, RepositoryConfig]:
+) -> tuple[
+    EvaluationTask, RepositoryConfig, PublicationContextDocument | None
+]:
     return (
         load_frozen_task(task_path),
         load_repository_config(_repository_file(repository, config_path)),
+        load_publication_context(task_path),
     )
 
 
@@ -153,6 +197,7 @@ def _run_loaded_agent(
     output: Path,
     model: PatchModel,
     verifier: VerifierAdapter,
+    publication_context: PublicationContextDocument | None = None,
 ) -> RunResult:
     result = run(
         RunRequest(
@@ -171,6 +216,8 @@ def _run_loaded_agent(
     }
     if result.patch is not None:
         payloads["patch.diff"] = result.patch.content.encode()
+    if publication_context is not None:
+        payloads["publication-context.json"] = json_bytes(publication_context)
     write_artifact(output, payloads)
     return result
 
@@ -205,6 +252,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify = commands.add_parser("verify")
     verify.add_argument("--artifact", type=Path, required=True)
     verify.add_argument("--summary", type=Path)
+    publish = commands.add_parser("publish")
+    publish.add_argument("--artifact", type=Path, required=True)
+    publish.add_argument("--repository", required=True)
+    publish.add_argument("--issue", type=int, required=True)
+    publish.add_argument("--base", required=True)
+    publish.add_argument("--summary", type=Path)
     gate = commands.add_parser("gate")
     gate.add_argument("--output", type=Path, required=True)
     gate.add_argument("--github-output", type=Path, required=True)
@@ -219,7 +272,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config: RepositoryConfig | None = None
         try:
             repository = cast(Path, arguments.repository)
-            task, config = _load_agent_inputs(
+            task, config, publication_context = _load_agent_inputs(
                 cast(Path, arguments.task), repository, cast(str, arguments.config)
             )
             _run_loaded_agent(
@@ -229,6 +282,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output=cast(Path, arguments.output),
                 model=GeminiPatchModelAdapter.from_environment(config.model),
                 verifier=DockerVerifierAdapter(),
+                publication_context=publication_context,
             )
         except (ArtifactIntegrityError, PatchLoopError) as error:
             write_agent_failure_artifact(
@@ -242,6 +296,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "verify":
             verify_artifact(
                 cast(Path, arguments.artifact),
+                summary=cast(Path | None, arguments.summary),
+            )
+        elif arguments.command == "publish":
+            run_publish(
+                artifact=cast(Path, arguments.artifact),
+                repository=cast(str, arguments.repository),
+                issue_number=cast(int, arguments.issue),
+                base_branch=cast(str, arguments.base),
+                client=GitHubApiClient(
+                    api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+                    token=os.environ.get("GITHUB_TOKEN", ""),
+                ),
                 summary=cast(Path | None, arguments.summary),
             )
         else:
