@@ -16,8 +16,9 @@ from patchloop.adapters import (
     ToolResult,
     VerificationRequest,
     VerificationResult,
+    VerificationAttempt,
     VerifierAdapter,
-    check_result_document,
+    verification_result_document,
 )
 from patchloop.config import BudgetConfig, VerifierConfig
 from patchloop.sanitize import redact_text
@@ -72,7 +73,7 @@ class ControlledTools:
         self._original_files: dict[str, bytes | None] = {}
         self.latest_verification: VerificationResult | None = None
         self.verified_patch_sha256: str | None = None
-        self.verification_attempts: list[tuple[str | None, VerificationResult]] = []
+        self.verification_attempts: list[VerificationAttempt] = []
         self.iterations = 0
         self._exhaustion_event: ReportEvent | None = None
         self.policy_events: list[ReportEvent] = []
@@ -315,7 +316,7 @@ class ControlledTools:
             )
         )
         self.verification_attempts.append(
-            (self.verified_patch_sha256, self.latest_verification)
+            VerificationAttempt(self.verified_patch_sha256, self.latest_verification)
         )
         self.iterations += 1
         if (
@@ -326,23 +327,10 @@ class ControlledTools:
                 "iteration_limit_reached",
                 "The configured edit-and-verify iteration limit was reached.",
             )
-        return {
-            "status": self.latest_verification.status,
-            "setup": [
-                check_result_document(
-                    result,
-                    max_output_bytes=self._verifier_config.limits.output_bytes,
-                )
-                for result in self.latest_verification.setup
-            ],
-            "checks": [
-                check_result_document(
-                    check,
-                    max_output_bytes=self._verifier_config.limits.output_bytes,
-                )
-                for check in self.latest_verification.checks
-            ],
-        }
+        return verification_result_document(
+            self.latest_verification,
+            max_output_bytes=self._verifier_config.limits.output_bytes,
+        )
 
     def _diff(self) -> tuple[str, tuple[str, ...]]:
         changed_files = tuple(

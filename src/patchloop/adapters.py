@@ -140,6 +140,14 @@ class CheckResultDocument(TypedDict):
     output_truncated: bool
 
 
+class VerificationResultDocument(TypedDict):
+    status: Literal[
+        "checks_passed", "checks_failed", "setup_failed", "infrastructure_failed"
+    ]
+    setup: list[CheckResultDocument]
+    checks: list[CheckResultDocument]
+
+
 def check_result_document(
     result: CheckResult, *, max_output_bytes: int | None = None
 ) -> CheckResultDocument:
@@ -180,6 +188,28 @@ class VerificationResult:
             status="checks_passed",
             checks=tuple(CheckResult(command, "passed", 0) for command in commands),
         )
+
+
+def verification_result_document(
+    result: VerificationResult, *, max_output_bytes: int
+) -> VerificationResultDocument:
+    return {
+        "status": result.status,
+        "setup": [
+            check_result_document(item, max_output_bytes=max_output_bytes)
+            for item in result.setup
+        ],
+        "checks": [
+            check_result_document(item, max_output_bytes=max_output_bytes)
+            for item in result.checks
+        ],
+    }
+
+
+@dataclass(frozen=True)
+class VerificationAttempt:
+    patch_sha256: str | None
+    result: VerificationResult
 
 
 @dataclass(frozen=True)

@@ -13,13 +13,15 @@ from patchloop.adapters import (
     GitHubTaskResolver,
     IssueComment,
     PatchModel,
+    PatchCompletion,
     ReportEvent,
     TaskEvaluator,
     TerminalOutcome,
     ToolResult,
     VerifierAdapter,
     VerificationResult,
-    check_result_document,
+    VerificationAttempt,
+    verification_result_document,
 )
 from patchloop.config import RepositoryConfig
 from patchloop.controlled_tools import (
@@ -427,6 +429,18 @@ def _run_patch(
             completion = turn.completion
             break
         if not turn.tool_calls:
+            candidate = tools.patch_bundle()
+            if (
+                tools.latest_verification is not None
+                and tools.latest_verification.status == "checks_passed"
+                and candidate is not None
+                and tools.verified_patch_sha256 == candidate.sha256
+            ):
+                completion = PatchCompletion(
+                    "PatchLoop produced a patch that passes the configured checks.",
+                    "Review the generated Draft PR.",
+                )
+                break
             error = {
                 "category": "model",
                 "code": "empty_model_turn",
@@ -509,18 +523,12 @@ def _run_patch(
     ] = "not_run"
     if verification_result is not None:
         verification_status = verification_result.status
-        setup = [
-            check_result_document(
-                result, max_output_bytes=config.verifier.limits.output_bytes
-            )
-            for result in verification_result.setup
-        ]
-        checks = [
-            check_result_document(
-                result, max_output_bytes=config.verifier.limits.output_bytes
-            )
-            for result in verification_result.checks
-        ]
+        verification_document = verification_result_document(
+            verification_result,
+            max_output_bytes=config.verifier.limits.output_bytes,
+        )
+        setup = verification_document["setup"]
+        checks = verification_document["checks"]
     budget_exhausted = error is not None and error["category"] == "budget"
     if budget_exhausted:
         verification_status = "budget_exhausted"
@@ -690,26 +698,25 @@ def _verification_report(
 
 
 def _verification_attempt_reports(
-    attempts: list[tuple[str | None, VerificationResult]],
+    attempts: list[VerificationAttempt],
     config: RepositoryConfig,
 ) -> list[VerificationAttemptReport]:
     max_output_bytes = config.verifier.limits.output_bytes
-    return [
-        {
-            "iteration": iteration,
-            "patch_sha256": patch_sha256,
-            "status": result.status,
-            "setup": [
-                check_result_document(item, max_output_bytes=max_output_bytes)
-                for item in result.setup
-            ],
-            "checks": [
-                check_result_document(item, max_output_bytes=max_output_bytes)
-                for item in result.checks
-            ],
-        }
-        for iteration, (patch_sha256, result) in enumerate(attempts, start=1)
-    ]
+    documents: list[VerificationAttemptReport] = []
+    for iteration, attempt in enumerate(attempts, start=1):
+        result = verification_result_document(
+            attempt.result, max_output_bytes=max_output_bytes
+        )
+        documents.append(
+            {
+                "iteration": iteration,
+                "patch_sha256": attempt.patch_sha256,
+                "status": result["status"],
+                "setup": result["setup"],
+                "checks": result["checks"],
+            }
+        )
+    return documents
 
 
 def _verification_limit_events(

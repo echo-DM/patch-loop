@@ -66,7 +66,6 @@ def test_failed_check_feedback_can_drive_a_successful_repair(tmp_path: Path) -> 
                     ToolCall("second-check", "run_checks", {}),
                 )
             ),
-            ModelTurn.complete("Repair the greeting.", "Review the Draft PR."),
         )
     )
 
