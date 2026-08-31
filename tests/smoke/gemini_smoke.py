@@ -25,4 +25,4 @@ def test_live_gemini_adapter_returns_a_controlled_turn() -> None:
         (ToolDefinition("list_files", "List files below a path.", (), ("path",)),),
     )
 
-    assert turn.tool_calls or turn.completion or turn.decision
+    assert turn.tool_calls or turn.completion

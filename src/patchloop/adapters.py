@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Mapping, Protocol, Sequence, TypedDict, cast
+from typing import Literal, Mapping, Protocol, Sequence, TypedDict, cast, runtime_checkable
 
 from patchloop.config import RepositoryConfig, VerifierConfig
 from patchloop.sanitize import redact_text
@@ -119,6 +119,12 @@ class PatchModel(Protocol):
         observations: tuple[ToolResult, ...],
         available_tools: tuple[ToolDefinition, ...],
     ) -> ModelTurn: ...
+
+
+@runtime_checkable
+class ModelMetadata(Protocol):
+    provider_name: str
+    model_name: str
 
 
 @dataclass(frozen=True)

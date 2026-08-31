@@ -12,6 +12,7 @@ from patchloop.adapters import (
     GateRejection,
     GitHubTaskResolver,
     IssueComment,
+    ModelMetadata,
     PatchModel,
     PatchCompletion,
     ReportEvent,
@@ -30,7 +31,7 @@ from patchloop.controlled_tools import (
     PatchBundle,
     diff_line_count,
 )
-from patchloop.errors import InfrastructureError
+from patchloop.errors import ConfigError, InfrastructureError
 from patchloop.graph import evaluate_task
 from patchloop.sanitize import redact_text
 
@@ -233,6 +234,7 @@ def run(request: RunRequest) -> RunResult:
         assert task is not None
         task = _sanitize_evaluation_task(task)
         if request.adapters.model is not None:
+            _validate_model_config(request.config, request.adapters.model)
             if request.adapters.verifier is None:
                 raise InfrastructureError(
                     "verifier_adapter_missing",
@@ -276,7 +278,7 @@ def _result_from_decision(
     *,
     wall_time_minutes: int = 0,
     budget_error: ReportEvent | None = None,
-    model: object | None = None,
+    model: PatchModel | None = None,
 ) -> RunResult:
     questions = _validate_clarification_questions(decision)
     if decision.terminal_outcome == "pr_created":
@@ -627,10 +629,16 @@ def _wall_time_limit_error() -> ReportEvent:
     }
 
 
-def _model_report(config: RepositoryConfig, model: object | None) -> ModelReport:
-    provider = getattr(model, "provider_name", "configured")
-    if not isinstance(provider, str) or not provider:
-        provider = "configured"
+def _validate_model_config(config: RepositoryConfig, model: PatchModel) -> None:
+    if isinstance(model, ModelMetadata) and model.model_name != config.model:
+        raise ConfigError(
+            "model_config_mismatch",
+            "The model adapter must use the model selected by repository configuration.",
+        )
+
+
+def _model_report(config: RepositoryConfig, model: PatchModel | None) -> ModelReport:
+    provider = model.provider_name if isinstance(model, ModelMetadata) else "configured"
     return {"provider": redact_text(provider), "name": redact_text(config.model)}
 
 

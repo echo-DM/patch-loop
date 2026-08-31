@@ -45,6 +45,7 @@ class GeminiPatchModelAdapter:
         model_name: str,
         api_key: str,
         client: GeminiClient | None = None,
+        client_factory: Callable[..., object] = ChatGoogleGenerativeAI,
     ) -> None:
         if not api_key.strip():
             raise ConfigError(
@@ -52,15 +53,8 @@ class GeminiPatchModelAdapter:
                 f"{PATCHLOOP_GEMINI_API_KEY} must contain a Gemini API key.",
             )
         self.model_name = model_name
-        self._client = client or cast(
-            GeminiClient,
-            ChatGoogleGenerativeAI(
-                model=model_name,
-                api_key=api_key,
-                vertexai=False,
-                retries=0,
-                request_timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
-            ),
+        self._client = client if client is not None else cast(
+            GeminiClient, _create_client(client_factory, model_name, api_key)
         )
         self._bound_client: GeminiInvoker | None = None
         self._messages: list[BaseMessage] = []
@@ -80,17 +74,11 @@ class GeminiPatchModelAdapter:
                 "gemini_api_key_missing",
                 f"Set {PATCHLOOP_GEMINI_API_KEY} to use the Gemini adapter.",
             )
-        client = cast(
-            GeminiClient,
-            client_factory(
-                model=model_name,
-                api_key=api_key,
-                vertexai=False,
-                retries=0,
-                request_timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
-            ),
+        return cls(
+            model_name=model_name,
+            api_key=api_key,
+            client_factory=client_factory,
         )
-        return cls(model_name=model_name, api_key=api_key, client=client)
 
     def next_turn(
         self,
@@ -226,6 +214,18 @@ def _tool_declaration(tool: ToolDefinition) -> dict[str, object]:
             },
         },
     }
+
+
+def _create_client(
+    client_factory: Callable[..., object], model_name: str, api_key: str
+) -> object:
+    return client_factory(
+        model=model_name,
+        api_key=api_key,
+        vertexai=False,
+        retries=0,
+        request_timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 def _task_document(task: EvaluationTask) -> str:

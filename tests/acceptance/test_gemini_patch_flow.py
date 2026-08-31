@@ -79,23 +79,7 @@ def test_gemini_tool_calls_drive_only_the_controlled_patch_flow(tmp_path: Path) 
         ]
     )
 
-    result = run(
-        RunRequest(
-            task=TaskSnapshot("issue-108", "Update greeting", "Change the README."),
-            repository=repository,
-            config=load_repository_config(repository / ".patchloop.yml"),
-            adapters=RunAdapters(
-                model=GeminiPatchModelAdapter(
-                    model_name="gemma-4-31b-it",
-                    api_key="AIzaSyDedicatedPatchLoopKey123456789",
-                    client=client,
-                ),
-                verifier=DeterministicVerifierAdapter(
-                    VerificationResult.passed(("check greeting",))
-                ),
-            ),
-        )
-    )
+    result = run_gemini(repository, client)
 
     assert result.terminal_outcome == "pr_created"
     assert repository.joinpath("README.md").read_text() == "Hello from Gemini.\n"
@@ -247,6 +231,35 @@ def test_ambient_google_credentials_do_not_replace_the_dedicated_secret(
 
     assert error.value.code == "gemini_api_key_missing"
     assert "AIzaSyAmbient" not in error.value.message
+
+
+def test_configured_model_must_match_the_model_that_will_execute(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    client = FakeGeminiClient([FakeResponse(content="This must not execute.")])
+
+    with pytest.raises(ConfigError) as error:
+        run(
+            RunRequest(
+                task=TaskSnapshot("issue-108", "Update greeting", "Change README."),
+                repository=repository,
+                config=load_repository_config(repository / ".patchloop.yml"),
+                adapters=RunAdapters(
+                    model=GeminiPatchModelAdapter(
+                        model_name="different-model",
+                        api_key="AIzaSyDedicatedPatchLoopKey123456789",
+                        client=client,
+                    ),
+                    verifier=DeterministicVerifierAdapter(
+                        VerificationResult.passed(("check greeting",))
+                    ),
+                ),
+            )
+        )
+
+    assert error.value.code == "model_config_mismatch"
+    assert client.requests == []
 
 
 def run_gemini(repository: Path, client: FakeGeminiClient):
