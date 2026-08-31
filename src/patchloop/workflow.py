@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 
 from patchloop.adapters import (
+    EvaluationTask,
     GateRejection,
     GitHubClient,
     GitHubIssueAdapter,
@@ -16,7 +17,7 @@ from patchloop.adapters import (
     PatchModel,
     VerifierAdapter,
 )
-from patchloop.config import load_repository_config
+from patchloop.config import RepositoryConfig, load_repository_config
 from patchloop.core import RunAdapters, RunRequest, RunResult, run
 from patchloop.docker_verifier import DockerVerifierAdapter
 from patchloop.errors import ConfigError, InfrastructureError, PatchLoopError, TaskError
@@ -25,6 +26,9 @@ from patchloop.github_api import GitHubApiClient
 from patchloop.sanitize import redact_text
 from patchloop.workflow_artifacts import (
     ArtifactIntegrityError,
+    FrozenCommentDocument,
+    FrozenTaskDocument,
+    GateReportDocument,
     json_bytes,
     load_frozen_task,
     verify_artifact,
@@ -53,41 +57,38 @@ def run_gate(
     payloads: dict[str, bytes]
     if isinstance(resolution, GateRejection):
         authorized = False
-        gate_report = {
-            "gate_version": "1",
-            "authorized": False,
-            "task_id": resolution.task_id,
-            "code": resolution.code,
-            "message": resolution.message,
-        }
+        gate_report = GateReportDocument(
+            gate_version="1",
+            authorized=False,
+            task_id=resolution.task_id,
+            code=resolution.code,
+            message=resolution.message,
+        )
         payloads = {"gate-report.json": json_bytes(gate_report)}
     else:
         authorized = True
-        gate_report = {
-            "gate_version": "1",
-            "authorized": True,
-            "task_id": resolution.id,
-            "code": "authorized",
-            "message": "The triggering actor may run PatchLoop.",
-        }
-        task = {
-            "task_version": "1",
-            "id": redact_text(resolution.id),
-            "title": redact_text(resolution.title),
-            "body": redact_text(resolution.body),
-            "authorized_by": (
-                redact_text(resolution.authorized_by)
-                if resolution.authorized_by is not None
-                else None
-            ),
-            "supplemental_requirements": [
+        gate_report = GateReportDocument(
+            gate_version="1",
+            authorized=True,
+            task_id=resolution.id,
+            code="authorized",
+            message="The triggering actor may run PatchLoop.",
+        )
+        assert resolution.authorized_by is not None
+        task = FrozenTaskDocument(
+            task_version="1",
+            id=redact_text(resolution.id),
+            title=redact_text(resolution.title),
+            body=redact_text(resolution.body),
+            authorized_by=redact_text(resolution.authorized_by),
+            supplemental_requirements=[
                 _comment_document(comment)
                 for comment in resolution.supplemental_requirements
             ],
-            "reference_material": [
+            reference_material=[
                 _comment_document(comment) for comment in resolution.reference_material
             ],
-        }
+        )
         payloads = {
             "gate-report.json": json_bytes(gate_report),
             "task.json": json_bytes(task),
@@ -105,12 +106,12 @@ def run_gate(
     return authorized
 
 
-def _comment_document(comment: IssueComment) -> dict[str, object]:
-    return {
-        "id": comment.id,
-        "author": redact_text(comment.author),
-        "body": redact_text(comment.body),
-    }
+def _comment_document(comment: IssueComment) -> FrozenCommentDocument:
+    return FrozenCommentDocument(
+        id=comment.id,
+        author=redact_text(comment.author),
+        body=redact_text(comment.body),
+    )
 
 
 def run_agent(
@@ -123,17 +124,44 @@ def run_agent(
     verifier: VerifierAdapter | None = None,
 ) -> RunResult:
     """Run the public core seam and emit the Agent-to-Publish artifact."""
-    task = load_frozen_task(task_path)
-    config = load_repository_config(_repository_file(repository, config_path))
+    task, config = _load_agent_inputs(task_path, repository, config_path)
     selected_model = model or GeminiPatchModelAdapter.from_environment(config.model)
+    return _run_loaded_agent(
+        task=task,
+        repository=repository,
+        config=config,
+        output=output,
+        model=selected_model,
+        verifier=verifier or DockerVerifierAdapter(),
+    )
+
+
+def _load_agent_inputs(
+    task_path: Path, repository: Path, config_path: str
+) -> tuple[EvaluationTask, RepositoryConfig]:
+    return (
+        load_frozen_task(task_path),
+        load_repository_config(_repository_file(repository, config_path)),
+    )
+
+
+def _run_loaded_agent(
+    *,
+    task: EvaluationTask,
+    repository: Path,
+    config: RepositoryConfig,
+    output: Path,
+    model: PatchModel,
+    verifier: VerifierAdapter,
+) -> RunResult:
     result = run(
         RunRequest(
             task=task,
             repository=repository,
             config=config,
             adapters=RunAdapters(
-                model=selected_model,
-                verifier=verifier or DockerVerifierAdapter(),
+                model=model,
+                verifier=verifier,
             ),
         )
     )
@@ -187,15 +215,28 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "agent":
+        task: EvaluationTask | None = None
+        config: RepositoryConfig | None = None
         try:
-            run_agent(
-                task_path=cast(Path, arguments.task),
-                repository=cast(Path, arguments.repository),
-                config_path=cast(str, arguments.config),
+            repository = cast(Path, arguments.repository)
+            task, config = _load_agent_inputs(
+                cast(Path, arguments.task), repository, cast(str, arguments.config)
+            )
+            _run_loaded_agent(
+                task=task,
+                repository=repository,
+                config=config,
                 output=cast(Path, arguments.output),
+                model=GeminiPatchModelAdapter.from_environment(config.model),
+                verifier=DockerVerifierAdapter(),
             )
         except (ArtifactIntegrityError, PatchLoopError) as error:
-            write_agent_failure_artifact(cast(Path, arguments.output), error)
+            write_agent_failure_artifact(
+                cast(Path, arguments.output),
+                error,
+                task_id=task.id if task is not None else None,
+                config=config,
+            )
         return 0
     try:
         if arguments.command == "verify":

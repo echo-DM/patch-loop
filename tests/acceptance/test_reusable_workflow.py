@@ -397,6 +397,11 @@ def test_agent_setup_failure_still_emits_a_protected_terminal_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository = configured_repository(tmp_path)
+    repository.joinpath(".patchloop.yml").write_text(
+        repository.joinpath(".patchloop.yml")
+        .read_text()
+        .replace("max_tool_calls: 60", "max_tool_calls: 7")
+    )
     task = tmp_path / "task.json"
     task.write_text(
         """{
@@ -431,7 +436,11 @@ def test_agent_setup_failure_still_emits_a_protected_terminal_summary(
     verified = verify_artifact(output, summary=tmp_path / "summary.md")
     report = cast(dict[str, object], verified["run-report.json"])
     assert report["terminal_outcome"] == "failed"
+    assert report["task_id"] == "issue-42"
+    assert cast(dict[str, object], report["model"])["name"] == "fixture-model"
     assert cast(dict[str, object], report["verification"])["status"] == "not_run"
+    budgets = cast(dict[str, object], report["budgets"])
+    assert cast(dict[str, object], budgets["limits"])["max_tool_calls"] == 7
     assert "gemini_api_key_missing" in output.joinpath("run-report.json").read_text()
     summary = tmp_path.joinpath("summary.md").read_text()
     assert "failed" in summary

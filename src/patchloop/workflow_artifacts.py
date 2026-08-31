@@ -4,10 +4,10 @@ import hashlib
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Literal, TypedDict, cast
 
 from patchloop.adapters import EvaluationTask, IssueComment
-from patchloop.config import SAFETY_CEILINGS
+from patchloop.config import RepositoryConfig, SAFETY_CEILINGS
 from patchloop.controlled_tools import MAX_PATCHED_FILE_BYTES
 from patchloop.errors import ConfigError, InfrastructureError, PatchLoopError, TaskError
 from patchloop.sanitize import redact_text
@@ -16,6 +16,40 @@ from patchloop.sanitize import redact_text
 ARTIFACT_VERSION = "1"
 RUN_PAYLOADS = {"patch.diff", "publication-intent.json", "run-report.json"}
 GATE_PAYLOADS = {"gate-report.json", "task.json"}
+
+
+class ArtifactFileMetadata(TypedDict):
+    byte_length: int
+    sha256: str
+
+
+class ArtifactManifest(TypedDict):
+    artifact_version: Literal["1"]
+    files: dict[str, ArtifactFileMetadata]
+
+
+class FrozenCommentDocument(TypedDict):
+    id: int
+    author: str
+    body: str
+
+
+class FrozenTaskDocument(TypedDict):
+    task_version: Literal["1"]
+    id: str
+    title: str
+    body: str
+    authorized_by: str
+    supplemental_requirements: list[FrozenCommentDocument]
+    reference_material: list[FrozenCommentDocument]
+
+
+class GateReportDocument(TypedDict):
+    gate_version: Literal["1"]
+    authorized: bool
+    task_id: str
+    code: str
+    message: str
 
 
 class ArtifactIntegrityError(ValueError):
@@ -28,20 +62,23 @@ def json_bytes(document: object) -> bytes:
 
 def write_artifact(output: Path, payloads: Mapping[str, bytes]) -> None:
     output.mkdir(parents=True, exist_ok=False)
-    files: dict[str, dict[str, object]] = {}
+    files: dict[str, ArtifactFileMetadata] = {}
     for name, content in payloads.items():
         output.joinpath(name).write_bytes(content)
         files[name] = {
             "byte_length": len(content),
             "sha256": hashlib.sha256(content).hexdigest(),
         }
-    output.joinpath("manifest.json").write_bytes(
-        json_bytes({"artifact_version": ARTIFACT_VERSION, "files": files})
-    )
+    manifest = ArtifactManifest(artifact_version="1", files=files)
+    output.joinpath("manifest.json").write_bytes(json_bytes(manifest))
 
 
 def write_agent_failure_artifact(
-    output: Path, error: PatchLoopError | ArtifactIntegrityError
+    output: Path,
+    error: PatchLoopError | ArtifactIntegrityError,
+    *,
+    task_id: str | None = None,
+    config: RepositoryConfig | None = None,
 ) -> None:
     """Preserve a sanitized terminal report when Agent setup cannot start core.run."""
     if isinstance(error, ConfigError):
@@ -66,10 +103,28 @@ def write_agent_failure_artifact(
         "message": redact_text(message),
     }
     publication = {"intent": "none", "reason": "failed"}
+    if config is None:
+        model_name = "unavailable"
+        configured_checks: list[str] = []
+        budget_limits = {
+            **SAFETY_CEILINGS,
+            "max_file_bytes": MAX_PATCHED_FILE_BYTES,
+        }
+    else:
+        model_name = redact_text(config.model)
+        configured_checks = [redact_text(command) for command in config.verifier.checks]
+        budget_limits = {
+            "max_iterations": config.budgets.max_iterations,
+            "max_tool_calls": config.budgets.max_tool_calls,
+            "max_changed_files": config.budgets.max_changed_files,
+            "max_diff_lines": config.budgets.max_diff_lines,
+            "max_wall_time_minutes": config.budgets.max_wall_time_minutes,
+            "max_file_bytes": MAX_PATCHED_FILE_BYTES,
+        }
     report = {
         "report_version": "1",
-        "task_id": "unavailable",
-        "model": {"provider": "configured", "name": "unavailable"},
+        "task_id": redact_text(task_id) if task_id is not None else "unavailable",
+        "model": {"provider": "configured", "name": model_name},
         "terminal_outcome": "failed",
         "summary": "PatchLoop could not start the bounded Agent run.",
         "actionable_message": redact_text(message),
@@ -77,16 +132,13 @@ def write_agent_failure_artifact(
         "changed_files": {"count": 0, "paths": []},
         "verification": {
             "status": "not_run",
-            "configured_checks": [],
+            "configured_checks": configured_checks,
             "setup": [],
             "checks": [],
             "attempts": [],
         },
         "budgets": {
-            "limits": {
-                **SAFETY_CEILINGS,
-                "max_file_bytes": MAX_PATCHED_FILE_BYTES,
-            },
+            "limits": budget_limits,
             "usage": {
                 "iterations": 0,
                 "tool_calls": 0,
