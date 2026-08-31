@@ -76,6 +76,7 @@ def test_failed_check_feedback_can_drive_a_successful_repair(tmp_path: Path) -> 
     assert result.report["budgets"]["usage"]["iterations"] == 2
     assert result.report["budgets"]["usage"]["tool_calls"] == 4
     assert result.report["budgets"]["usage"]["changed_files"] == 1
+    assert len(model.observations) == 2
     assert (repository / "README.md").read_text() == "repaired\n"
     assert result.patch is not None
     assert "+repaired" in result.patch.content

@@ -183,7 +183,7 @@ def test_invalid_tool_requests_are_controlled_and_model_can_recover(
     assert secret not in str(result.report)
 
 
-def test_patch_changed_after_checks_is_not_publishable(tmp_path: Path) -> None:
+def test_passing_checks_terminalize_before_a_later_model_edit(tmp_path: Path) -> None:
     repository = configured_repository(tmp_path)
     model = DeterministicPatchModelAdapter(
         (
@@ -224,11 +224,13 @@ def test_patch_changed_after_checks_is_not_publishable(tmp_path: Path) -> None:
         )
     )
 
-    assert result.terminal_outcome == "failed"
-    assert result.patch is None
-    assert result.publication == {"intent": "none", "reason": "failed"}
+    assert result.terminal_outcome == "pr_created"
+    assert result.patch is not None
+    assert "+Checked content." in result.patch.content
+    assert (repository / "README.md").read_text() == "Checked content.\n"
+    assert result.publication["intent"] == "draft_pr"
     assert result.report["changed_files"] == {"count": 1, "paths": ["README.md"]}
-    assert result.report["errors"][0]["code"] == "patch_changed_after_verification"
+    assert result.report["errors"] == []
 
 
 def test_patch_model_can_stop_for_clarification_without_editing(tmp_path: Path) -> None:

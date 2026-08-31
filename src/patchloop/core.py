@@ -429,17 +429,8 @@ def _run_patch(
             completion = turn.completion
             break
         if not turn.tool_calls:
-            candidate = tools.patch_bundle()
-            if (
-                tools.latest_verification is not None
-                and tools.latest_verification.status == "checks_passed"
-                and candidate is not None
-                and tools.verified_patch_sha256 == candidate.sha256
-            ):
-                completion = PatchCompletion(
-                    "PatchLoop produced a patch that passes the configured checks.",
-                    "Review the generated Draft PR.",
-                )
+            completion = _passing_checks_completion(tools)
+            if completion is not None:
                 break
             error = {
                 "category": "model",
@@ -467,11 +458,14 @@ def _run_patch(
                 error = _verifier_interruption(tools.latest_verification)
                 if error is not None:
                     break
+                completion = _passing_checks_completion(tools)
+                if completion is not None:
+                    break
             if tools.exhaustion_event is not None:
                 error = tools.exhaustion_event
                 break
         observations = tuple(next_observations)
-        if error is not None:
+        if error is not None or completion is not None:
             break
 
     patch = tools.patch_bundle()
@@ -641,6 +635,19 @@ def _verifier_interruption(
             "message": "Docker could not complete the verifier run.",
         }
     return None
+
+
+def _passing_checks_completion(tools: ControlledTools) -> PatchCompletion | None:
+    verification = tools.latest_verification
+    if verification is None or verification.status != "checks_passed":
+        return None
+    candidate = tools.patch_bundle()
+    if candidate is None or tools.verified_patch_sha256 != candidate.sha256:
+        return None
+    return PatchCompletion(
+        "PatchLoop produced a patch that passes the configured checks.",
+        "Review the generated Draft PR.",
+    )
 
 
 def _wall_time_failure(

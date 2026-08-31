@@ -215,7 +215,7 @@ def test_protected_authority_paths_are_rejected_and_recorded(tmp_path: Path) -> 
     ]
 
 
-def test_iteration_limit_stops_an_additional_edit_cycle(tmp_path: Path) -> None:
+def test_passing_final_iteration_stops_an_additional_edit_cycle(tmp_path: Path) -> None:
     repository = configured_repository(tmp_path, max_iterations=1)
     model = DeterministicPatchModelAdapter(
         (
@@ -248,11 +248,9 @@ def test_iteration_limit_stops_an_additional_edit_cycle(tmp_path: Path) -> None:
     assert result.patch is not None
     assert result.patch.changed_files == ("README.md",)
     assert not (repository / "SECOND.md").exists()
-    assert result.verification["status"] == "budget_exhausted"
+    assert result.verification["status"] == "checks_passed"
     assert result.report["budgets"]["usage"]["iterations"] == 1
-    assert result.report["budgets"]["resource_limit_events"][-1]["code"] == (
-        "iteration_limit_reached"
-    )
+    assert result.report["budgets"]["resource_limit_events"] == []
 
 
 def test_failed_final_iteration_immediately_exhausts_the_budget(tmp_path: Path) -> None:
