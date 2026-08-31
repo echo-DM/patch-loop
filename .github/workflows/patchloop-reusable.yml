@@ -1,0 +1,134 @@
+name: PatchLoop reusable workflow
+
+on:
+  workflow_call:
+    inputs:
+      event_json:
+        description: Serialized issues/labeled event from the caller repository
+        required: true
+        type: string
+      config_path:
+        description: Repository-relative PatchLoop configuration path
+        required: false
+        default: .patchloop.yml
+        type: string
+    secrets:
+      gemini_api_key:
+        description: Dedicated Gemini Developer API key
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      authorized: ${{ steps.gate.outputs.authorized }}
+    steps:
+      - name: Check out PatchLoop
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _patchloop
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: Install PatchLoop
+        run: uv sync --project _patchloop --locked
+      - name: Authorize and freeze Issue
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PATCHLOOP_EVENT_JSON: ${{ inputs.event_json }}
+        run: >-
+          uv run --project _patchloop python -m patchloop.workflow gate
+          --output gate --github-output "$GITHUB_OUTPUT"
+          --summary "$GITHUB_STEP_SUMMARY"
+      - name: Upload frozen task
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patchloop-gate
+          path: gate/
+          if-no-files-found: error
+          retention-days: 1
+
+  agent:
+    needs: gate
+    if: needs.gate.outputs.authorized == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out target repository
+        uses: actions/checkout@v4
+        with:
+          path: target
+          persist-credentials: false
+      - name: Check out PatchLoop
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _patchloop
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: Install PatchLoop
+        run: uv sync --project _patchloop --locked
+      - name: Download frozen task
+        uses: actions/download-artifact@v4
+        with:
+          name: patchloop-gate
+          path: gate
+      - name: Run bounded Agent
+        env:
+          PATCHLOOP_GEMINI_API_KEY: ${{ secrets.gemini_api_key }}
+          PATCHLOOP_CONFIG_PATH: ${{ inputs.config_path }}
+        run: >-
+          uv run --project _patchloop python -m patchloop.workflow agent
+          --task gate/task.json --repository target
+          --config "$PATCHLOOP_CONFIG_PATH" --output result
+      - name: Upload protected run result
+        uses: actions/upload-artifact@v4
+        with:
+          name: patchloop-result
+          path: result/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: agent
+    if: needs.agent.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out PatchLoop
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _patchloop
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: Install PatchLoop
+        run: uv sync --project _patchloop --locked
+      - name: Download protected run result
+        uses: actions/download-artifact@v4
+        with:
+          name: patchloop-result
+          path: result
+      - name: Verify result and write summary
+        run: >-
+          uv run --project _patchloop python -m patchloop.workflow verify
+          --artifact result --summary "$GITHUB_STEP_SUMMARY"

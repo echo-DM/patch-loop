@@ -1,0 +1,23 @@
+name: PatchLoop
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: patchloop-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  patchloop:
+    if: github.event.label.name == 'patchloop'
+    uses: OWNER/patchloop/.github/workflows/patchloop-reusable.yml@v1
+    with:
+      event_json: ${{ toJson(github.event) }}
+      config_path: .patchloop.yml
+    secrets:
+      gemini_api_key: ${{ secrets.PATCHLOOP_GEMINI_API_KEY }}

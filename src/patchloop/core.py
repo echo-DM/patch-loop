@@ -169,7 +169,7 @@ class RunAdapters:
 
 @dataclass(frozen=True)
 class RunRequest:
-    task: TaskSnapshot | GitHubEventTask
+    task: TaskSnapshot | GitHubEventTask | EvaluationTask
     repository: Path
     config: RepositoryConfig
     adapters: RunAdapters
@@ -223,6 +223,9 @@ def run(request: RunRequest) -> RunResult:
         else:
             task = resolution
             task_id = task.id
+    elif isinstance(request.task, EvaluationTask):
+        task = request.task
+        task_id = task.id
     else:
         task = EvaluationTask(
             id=request.task.id,

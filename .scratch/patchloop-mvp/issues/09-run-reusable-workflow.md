@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — 拒绝未经授权的 Issue 运行；07 — 根据 check 失败修补并有界停止；08 — 用 Gemini 驱动受控 patch 流程
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] reusable workflow 接收调用仓库的 Issue event、配置和命名 Gemini secret，不依赖隐式继承全部 secrets。
 - [ ] caller 只在目标标签事件上调用 workflow，并为同一 Issue 设置唯一 concurrency group。
