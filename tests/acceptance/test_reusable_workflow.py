@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +19,7 @@ from patchloop.adapters import (
 )
 from patchloop.workflow import (
     ArtifactIntegrityError,
+    main as workflow_main,
     run_agent,
     run_gate,
     verify_artifact,
@@ -335,6 +337,106 @@ def test_artifact_verification_rejects_tampering_and_undeclared_files(
 
     with pytest.raises(ArtifactIntegrityError):
         verify_artifact(output)
+
+
+def test_artifact_verification_rejects_conflicting_publication_intents(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    task = tmp_path / "task.json"
+    task.write_text(
+        """{
+  "task_version": "1",
+  "id": "issue-42",
+  "title": "No change",
+  "body": "No patch is needed.",
+  "authorized_by": "maintainer",
+  "supplemental_requirements": [],
+  "reference_material": []
+}
+"""
+    )
+    output = tmp_path / "result"
+    run_agent(
+        task_path=task,
+        repository=repository,
+        config_path=".patchloop.yml",
+        output=output,
+        model=DeterministicPatchModelAdapter(
+            [
+                ModelTurn.decide(
+                    EvaluationDecision(
+                        terminal_outcome="no_change",
+                        summary="No change is required.",
+                        actionable_message="Do not publish a pull request.",
+                    )
+                )
+            ]
+        ),
+        verifier=DeterministicVerifierAdapter(
+            VerificationResult.passed(("check greeting",))
+        ),
+    )
+    intent_path = output / "publication-intent.json"
+    intent_path.write_text('{"intent":"none","reason":"failed"}\n')
+    manifest_path = output / "manifest.json"
+    manifest = cast(dict[str, object], json.loads(manifest_path.read_text()))
+    files = cast(dict[str, object], manifest["files"])
+    intent_bytes = intent_path.read_bytes()
+    files["publication-intent.json"] = {
+        "byte_length": len(intent_bytes),
+        "sha256": hashlib.sha256(intent_bytes).hexdigest(),
+    }
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    with pytest.raises(ArtifactIntegrityError):
+        verify_artifact(output)
+
+
+def test_agent_setup_failure_still_emits_a_protected_terminal_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = configured_repository(tmp_path)
+    task = tmp_path / "task.json"
+    task.write_text(
+        """{
+  "task_version": "1",
+  "id": "issue-42",
+  "title": "Update greeting",
+  "body": "Change the greeting.",
+  "authorized_by": "maintainer",
+  "supplemental_requirements": [],
+  "reference_material": []
+}
+"""
+    )
+    output = tmp_path / "result"
+    monkeypatch.delenv("PATCHLOOP_GEMINI_API_KEY", raising=False)
+
+    exit_code = workflow_main(
+        [
+            "agent",
+            "--task",
+            str(task),
+            "--repository",
+            str(repository),
+            "--config",
+            ".patchloop.yml",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    verified = verify_artifact(output, summary=tmp_path / "summary.md")
+    report = cast(dict[str, object], verified["run-report.json"])
+    assert report["terminal_outcome"] == "failed"
+    assert cast(dict[str, object], report["verification"])["status"] == "not_run"
+    assert "gemini_api_key_missing" in output.joinpath("run-report.json").read_text()
+    summary = tmp_path.joinpath("summary.md").read_text()
+    assert "failed" in summary
+    assert "not_run" in summary
+    assert "Tool calls" in summary
 
     output.joinpath("run-report.json").unlink()
     output.joinpath("undeclared.txt").write_text("unexpected")
