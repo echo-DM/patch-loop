@@ -123,9 +123,15 @@ class IntegrityReport(TypedDict):
     patch_sha256: str
 
 
+class ModelReport(TypedDict):
+    provider: str
+    name: str
+
+
 class RunReport(TypedDict):
     report_version: Literal["1"]
     task_id: str
+    model: ModelReport
     terminal_outcome: TerminalOutcome
     summary: str
     actionable_message: str
@@ -270,6 +276,7 @@ def _result_from_decision(
     *,
     wall_time_minutes: int = 0,
     budget_error: ReportEvent | None = None,
+    model: object | None = None,
 ) -> RunResult:
     questions = _validate_clarification_questions(decision)
     if decision.terminal_outcome == "pr_created":
@@ -346,6 +353,7 @@ def _result_from_decision(
     report: RunReport = {
         "report_version": "1",
         "task_id": redact_text(task_id),
+        "model": _model_report(config, model),
         "terminal_outcome": decision.terminal_outcome,
         "summary": redact_text(decision.summary),
         "actionable_message": redact_text(decision.actionable_message),
@@ -424,6 +432,7 @@ def _run_patch(
                 turn.decision,
                 config,
                 wall_time_minutes=int(elapsed_seconds // 60),
+                model=model,
             )
         if turn.completion is not None:
             completion = turn.completion
@@ -585,6 +594,7 @@ def _run_patch(
     report: RunReport = {
         "report_version": "1",
         "task_id": redact_text(task.id),
+        "model": _model_report(config, model),
         "terminal_outcome": terminal_outcome,
         "summary": redact_text(summary),
         "actionable_message": redact_text(actionable_message),
@@ -615,6 +625,13 @@ def _wall_time_limit_error() -> ReportEvent:
         "code": "wall_time_limit_reached",
         "message": "The configured wall-clock time limit was reached.",
     }
+
+
+def _model_report(config: RepositoryConfig, model: object | None) -> ModelReport:
+    provider = getattr(model, "provider_name", "configured")
+    if not isinstance(provider, str) or not provider:
+        provider = "configured"
+    return {"provider": redact_text(provider), "name": redact_text(config.model)}
 
 
 def _verifier_interruption(

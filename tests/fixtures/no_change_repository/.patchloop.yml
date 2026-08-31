@@ -1,5 +1,5 @@
 version: 1
-model: gemini-2.5-flash
+model: gemma-4-31b-it
 verifier:
   image: python:3.12-slim
   setup:

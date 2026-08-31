@@ -17,10 +17,12 @@ from patchloop.core import (
     run,
 )
 from patchloop.docker_verifier import DockerVerifierAdapter
+from patchloop.gemini import GeminiPatchModelAdapter
 
 __all__ = [
     "GitHubEventTask",
     "GitHubIssueAdapter",
+    "GeminiPatchModelAdapter",
     "DeterministicPatchModelAdapter",
     "DeterministicModelAdapter",
     "DeterministicVerifierAdapter",

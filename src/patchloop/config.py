@@ -43,6 +43,9 @@ class RepositoryConfig:
     budgets: BudgetConfig
 
 
+DEFAULT_MODEL = "gemma-4-31b-it"
+
+
 SAFETY_CEILINGS = {
     "max_iterations": 3,
     "max_tool_calls": 60,
@@ -99,6 +102,15 @@ def _docker_image(value: object) -> str:
             "verifier.image must be a valid Docker image reference.",
         )
     return image
+
+
+def _model_identifier(value: object) -> str:
+    model = _string(value, "model")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,199}", model) is None:
+        raise ConfigError(
+            "invalid_config_value", "model must be a valid provider model identifier."
+        )
+    return model
 
 
 def _commands(value: object, path: str, *, require_one: bool) -> tuple[str, ...]:
@@ -201,7 +213,7 @@ def load_repository_config(path: Path) -> RepositoryConfig:
     budgets_document = _mapping(_required(document, "budgets"), "budgets")
     return RepositoryConfig(
         version=version,
-        model=_string(_required(document, "model"), "model"),
+        model=_model_identifier(document.get("model", DEFAULT_MODEL)),
         verifier=VerifierConfig(
             image=_docker_image(
                 _required(verifier_document, "image", "verifier.image"),

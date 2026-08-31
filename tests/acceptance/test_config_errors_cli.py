@@ -27,21 +27,36 @@ def test_unknown_config_version_is_a_configuration_error(
     }
 
 
-def test_missing_required_config_field_is_named(cli_harness: CliHarness) -> None:
+def test_missing_model_uses_the_default(cli_harness: CliHarness) -> None:
     repository = cli_harness.copy_repository()
     config = repository / ".patchloop.yml"
-    config.write_text(config.read_text().replace("model: gemini-2.5-flash\n", ""))
+    config.write_text(config.read_text().replace("model: gemma-4-31b-it\n", ""))
+
+    completed = cli_harness.run(repository)
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["model"] == {
+        "provider": "configured",
+        "name": "gemma-4-31b-it",
+    }
+
+
+def test_model_identifier_is_validated_before_execution(
+    cli_harness: CliHarness,
+) -> None:
+    repository = cli_harness.copy_repository()
+    config = repository / ".patchloop.yml"
+    config.write_text(
+        config.read_text().replace("model: gemma-4-31b-it", 'model: "bad model\\nname"')
+    )
 
     completed = cli_harness.run(repository)
 
     assert completed.returncode == 2
-    assert completed.stdout == ""
-    assert json.loads(completed.stderr) == {
-        "error": {
-            "category": "configuration",
-            "code": "missing_required_field",
-            "message": "Missing required configuration field: model.",
-        }
+    assert json.loads(completed.stderr)["error"] == {
+        "category": "configuration",
+        "code": "invalid_config_value",
+        "message": "model must be a valid provider model identifier.",
     }
 
 
