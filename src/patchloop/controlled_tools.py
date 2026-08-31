@@ -174,6 +174,15 @@ class ControlledTools:
             changed_files=changed_files,
         )
 
+    def has_current_passing_verification(self) -> bool:
+        candidate = self.patch_bundle()
+        return (
+            self.latest_verification is not None
+            and self.latest_verification.status == "checks_passed"
+            and candidate is not None
+            and self.verified_patch_sha256 == candidate.sha256
+        )
+
     def _list_files(self, arguments: Mapping[str, object]) -> object:
         raw_path = arguments.get("path", ".")
         path = self._resolve_existing_path(raw_path, allow_root=True)

@@ -638,11 +638,7 @@ def _verifier_interruption(
 
 
 def _passing_checks_completion(tools: ControlledTools) -> PatchCompletion | None:
-    verification = tools.latest_verification
-    if verification is None or verification.status != "checks_passed":
-        return None
-    candidate = tools.patch_bundle()
-    if candidate is None or tools.verified_patch_sha256 != candidate.sha256:
+    if not tools.has_current_passing_verification():
         return None
     return PatchCompletion(
         "PatchLoop produced a patch that passes the configured checks.",
