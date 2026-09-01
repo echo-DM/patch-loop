@@ -15,7 +15,9 @@ from patchloop.core import (
     run,
     validate_repository_workspace,
 )
+from patchloop.docker_verifier import DockerVerifierAdapter
 from patchloop.errors import ConfigError, InfrastructureError, TaskError
+from patchloop.gemini import GeminiPatchModelAdapter
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--task", type=Path, required=True)
     run_parser.add_argument("--repository", type=Path, required=True)
+    run_parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Use the live Gemini adapter and Docker verifier.",
+    )
     return parser
 
 
@@ -60,12 +67,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     repository = cast(Path, arguments.repository)
     try:
         validate_repository_workspace(repository)
+        task = load_task(cast(Path, arguments.task))
+        config = load_repository_config(repository / ".patchloop.yml")
+        adapters = (
+            RunAdapters(
+                model=GeminiPatchModelAdapter.from_environment(config.model),
+                verifier=DockerVerifierAdapter(),
+            )
+            if cast(bool, arguments.live)
+            else RunAdapters(evaluator=ExplicitNoChangeEvaluator())
+        )
         result = run(
             RunRequest(
-                task=load_task(cast(Path, arguments.task)),
+                task=task,
                 repository=repository,
-                config=load_repository_config(repository / ".patchloop.yml"),
-                adapters=RunAdapters(evaluator=ExplicitNoChangeEvaluator()),
+                config=config,
+                adapters=adapters,
             )
         )
     except (TaskError, ConfigError, InfrastructureError) as error:
@@ -90,4 +107,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1 if isinstance(error, TaskError) else 2
     print(json.dumps(result.report, sort_keys=True))
-    return 0 if result.terminal_outcome == "no_change" else 1
+    return 0 if result.terminal_outcome != "failed" else 1
