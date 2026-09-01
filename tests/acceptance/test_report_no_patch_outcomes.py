@@ -250,6 +250,37 @@ def test_feedback_redacts_truncates_and_escapes_untrusted_report_text(
     assert len(body) < 1_200
 
 
+def test_feedback_redacts_bearer_and_aws_credential_shapes(tmp_path: Path) -> None:
+    bearer = "eyJhbGciOiJIUzI1NiJ9.private.signature"
+    aws_access_key = "AKIAIOSFODNN7EXAMPLE"
+    aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    artifact = no_patch_artifact(
+        tmp_path,
+        terminal_outcome="no_change",
+        publication={"intent": "none", "reason": "no_change"},
+        summary=(
+            f"Authorization: Bearer {bearer}; access id {aws_access_key}; "
+            f"AWS_SECRET_ACCESS_KEY={aws_secret}"
+        ),
+        actionable_message="No edit is required.",
+    )
+    publisher = FeedbackPublisher()
+
+    run_publish(
+        artifact=artifact,
+        repository="octo-org/example",
+        issue_number=42,
+        base_branch="main",
+        client=publisher,
+    )
+
+    body = str(publisher.requests[0][3])
+    assert bearer not in body
+    assert aws_access_key not in body
+    assert aws_secret not in body
+    assert body.count("REDACTED") >= 3
+
+
 def test_low_permission_feedback_does_not_repeat_actor_repository_or_secret_state(
     tmp_path: Path,
 ) -> None:

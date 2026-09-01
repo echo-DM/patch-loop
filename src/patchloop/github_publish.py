@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from patchloop.errors import InfrastructureError
-from patchloop.publication_feedback import no_patch_feedback, validate_no_patch_outcome
+from patchloop.publication_feedback import no_patch_feedback
 from patchloop.publication_patch import FilePatch, apply_file_patch, validate_patch
 from patchloop.publication_report import pull_request_body
 from patchloop.workflow_artifacts import (
@@ -106,7 +106,6 @@ def run_publish(
     )
     _validate_context_identity(report, context, repository, issue_number, base_branch)
     if publication.get("intent") != "draft_pr":
-        validate_no_patch_outcome(report, publication)
         body = no_patch_feedback(report, publication)
         if summary is not None:
             append_run_summary(summary, report)

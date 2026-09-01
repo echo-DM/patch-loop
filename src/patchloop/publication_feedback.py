@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from html import escape
 import re
+from typing import Literal
 
 from patchloop.sanitize import redact_text
 from patchloop.workflow_artifacts import ArtifactIntegrityError
@@ -15,7 +16,7 @@ def no_patch_feedback(
     report: Mapping[str, object], publication: Mapping[str, object]
 ) -> str:
     """Render bounded Issue feedback from validated, observable report fields."""
-    outcome = report.get("terminal_outcome")
+    outcome = validate_no_patch_outcome(report, publication)
     if outcome == "no_change":
         return "\n".join(
             [
@@ -66,12 +67,12 @@ def no_patch_feedback(
 
 def validate_no_patch_outcome(
     report: Mapping[str, object], publication: Mapping[str, object]
-) -> None:
+) -> Literal["no_change", "needs_clarification", "failed"]:
     if report.get("terminal_outcome") == "no_change" and publication == {
         "intent": "none",
         "reason": "no_change",
     }:
-        return
+        return "no_change"
     if report.get("terminal_outcome") == "needs_clarification":
         questions = _questions(publication)
         if publication == {
@@ -79,13 +80,13 @@ def validate_no_patch_outcome(
             "reason": "needs_clarification",
             "questions": questions,
         } and report.get("clarification_questions") == questions:
-            return
+            return "needs_clarification"
     if report.get("terminal_outcome") == "failed" and publication == {
         "intent": "none",
         "reason": "failed",
     }:
         _primary_error(report)
-        return
+        return "failed"
     raise ArtifactIntegrityError("Run report has an invalid no-patch publication intent.")
 
 
