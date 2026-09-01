@@ -1,0 +1,54 @@
+name: PatchLoop live smoke
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: patchloop-smoke-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  patchloop:
+    if: github.event.label.name == 'patchloop'
+    uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@REPLACE_WITH_CANDIDATE_SHA
+    with:
+      event_json: ${{ toJson(github.event) }}
+      config_path: .patchloop.yml
+    secrets:
+      gemini_api_key: ${{ secrets.PATCHLOOP_GEMINI_API_KEY }}
+
+  inspect-live-state:
+    needs: patchloop
+    if: needs.patchloop.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out PatchLoop candidate
+        uses: actions/checkout@v4
+        with:
+          repository: echo-DM/patch-loop
+          ref: REPLACE_WITH_CANDIDATE_SHA
+          path: _patchloop
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - name: Install PatchLoop candidate
+        run: uv sync --project _patchloop --locked
+      - name: Inspect the live Draft PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PATCHLOOP_RUN_GITHUB_SMOKE: "1"
+          PATCHLOOP_SMOKE_REPOSITORY: ${{ github.repository }}
+          PATCHLOOP_SMOKE_ISSUE: ${{ github.event.issue.number }}
+        run: >-
+          uv run --project _patchloop pytest
+          _patchloop/tests/smoke/github_smoke.py -q

@@ -16,7 +16,7 @@ concurrency:
 jobs:
   patchloop:
     if: github.event.label.name == 'patchloop'
-    uses: OWNER/patchloop/.github/workflows/patchloop-reusable.yml@v1
+    uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@v0.1.0
     with:
       event_json: ${{ toJson(github.event) }}
       config_path: .patchloop.yml

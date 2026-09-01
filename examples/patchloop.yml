@@ -1,0 +1,20 @@
+version: 1
+model: gemma-4-31b-it
+verifier:
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  setup:
+    - uv sync --frozen
+  checks:
+    - uv run mypy
+    - uv run pytest
+  limits:
+    timeout_seconds: 1800
+    memory_mb: 4096
+    pids: 512
+    output_bytes: 1000000
+budgets:
+  max_iterations: 3
+  max_tool_calls: 60
+  max_changed_files: 20
+  max_diff_lines: 2000
+  max_wall_time_minutes: 30

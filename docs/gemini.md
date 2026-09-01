@@ -62,3 +62,11 @@ PATCHLOOP_RUN_GEMINI_SMOKE=1 \
 
 The smoke test also requires `PATCHLOOP_GEMINI_API_KEY`. Do not put the key in
 `.patchloop.yml`, `.env`, test fixtures, or command-line arguments.
+
+If the enable flag or dedicated key is absent, the smoke test skips without
+calling the provider. The complete GitHub smoke is a separate target-repository
+workflow: copy `examples/patchloop-smoke-caller.yml` into a dedicated private
+repository, replace both candidate placeholders with the same reviewed commit
+SHA, and configure `PATCHLOOP_GEMINI_API_KEY` as that repository's Actions
+secret. Its inspection Job uses only the automatic `GITHUB_TOKEN` and never
+receives the Gemini key. See the root README and Ticket 14 for the release gate.
