@@ -195,15 +195,20 @@ uv run python scripts/validate_offline.py
 It requires a running Docker daemon and a preloaded `alpine:3.22` fixture image,
 then checks the lock, strict typing, the complete pytest suite (including real
 Docker acceptance, workflow contracts, and credential-redaction scenarios),
-wheel/sdist builds, and whitespace. It never calls Gemini or writes to GitHub.
+wheel/sdist builds, installs the wheel into an isolated temporary environment,
+executes its `patchloop` entry point, and checks whitespace. Here “offline” means
+no live Gemini or GitHub operations; dependency setup still requires a populated
+uv cache or ordinary package-index access.
 
 Live smoke is separate, explicit, and release-gated:
 
 - [Gemini adapter smoke](tests/smoke/gemini_smoke.py) requires both
   `PATCHLOOP_RUN_GEMINI_SMOKE=1` and `PATCHLOOP_GEMINI_API_KEY`.
 - [Dedicated GitHub smoke caller](examples/patchloop-smoke-caller.yml) must be
-  installed in a separate private target such as `echo-DM/patch-loop-smoke`,
-  with both placeholder refs replaced by the same candidate commit SHA.
+  installed in a private Smoke repository such as `echo-DM/patch-loop-smoke`,
+  with both placeholder refs replaced by the same candidate commit SHA. Set the
+  repository variable `PATCHLOOP_RUN_LIVE_SMOKE=1`; without that explicit flag
+  or the named Gemini Secret, preflight safely skips the credentialed jobs.
 - [GitHub state inspection](tests/smoke/github_smoke.py) runs after the reusable
   workflow with the caller repository's automatic `GITHUB_TOKEN`; it verifies
   that the expected Draft PR exists and never receives the Gemini secret.

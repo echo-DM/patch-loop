@@ -54,7 +54,7 @@ Gemini/GitHub release acceptance has already run.
 | 45 | Covered | Ticket 01 onward; acceptance tests use public `patchloop.core.run`. |
 | 46 | Covered | Tickets 01/06/08/10; model, verifier, and GitHub adapter seams. |
 | 47 | Covered | Ticket 06; real `alpine:3.22` fixture Docker acceptance scenarios. |
-| 48 | Covered | Tickets 08/13/14; explicit skipped-by-default smoke paths and release gate. |
+| 48 | Covered | Tickets 08/13/14; explicit skipped-by-default Gemini and Smoke repository paths. |
 | 49 | Covered | Tickets 01/09/11; version-1 sanitized Run Report for terminal outcomes. |
 | 50 | Covered | Tickets 09/12; no remote checkpoint; durable branch/PR restart state. |
 | 51 | Covered | Tickets 09/10; Publish accepts only integrity-checked declared artifacts. |
@@ -66,6 +66,6 @@ Gemini/GitHub release acceptance has already run.
 
 Stories 1–54 are covered by the implementation, acceptance tests, documentation,
 or explicit manual boundary above. The credentialed proof that a candidate SHA
-works against real Gemini and a dedicated GitHub target remains Ticket 14. Until
+works against real Gemini and a Smoke repository remains Ticket 14. Until
 that succeeds, describe the MVP as offline-validated and installable from a
 candidate SHA, not as live release-accepted.

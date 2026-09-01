@@ -14,8 +14,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  patchloop:
+  preflight:
     if: github.event.label.name == 'patchloop'
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.readiness.outputs.enabled }}
+    steps:
+      - name: Check explicit enablement and credential presence
+        id: readiness
+        env:
+          PATCHLOOP_SMOKE_ENABLED: ${{ vars.PATCHLOOP_RUN_LIVE_SMOKE }}
+          PATCHLOOP_HAS_GEMINI_KEY: ${{ secrets.PATCHLOOP_GEMINI_API_KEY != '' }}
+        run: |
+          if [ "$PATCHLOOP_SMOKE_ENABLED" = "1" ] && [ "$PATCHLOOP_HAS_GEMINI_KEY" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  patchloop:
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
     uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@REPLACE_WITH_CANDIDATE_SHA
     with:
       event_json: ${{ toJson(github.event) }}

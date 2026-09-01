@@ -8,7 +8,7 @@ from patchloop.github_api import GitHubApiClient
 
 
 @pytest.mark.smoke
-def test_dedicated_repository_contains_the_live_draft_pr() -> None:
+def test_smoke_repository_contains_the_live_draft_pr() -> None:
     if os.environ.get("PATCHLOOP_RUN_GITHUB_SMOKE") != "1":
         pytest.skip("Set PATCHLOOP_RUN_GITHUB_SMOKE=1 to inspect live GitHub state.")
 
@@ -21,7 +21,7 @@ def test_dedicated_repository_contains_the_live_draft_pr() -> None:
             "and PATCHLOOP_SMOKE_ISSUE."
         )
     if repository == "echo-DM/patch-loop":
-        pytest.fail("Live smoke must use a dedicated target repository.")
+        pytest.fail("Live smoke must use a Smoke repository.")
     try:
         issue_number = int(issue_text)
     except ValueError:
