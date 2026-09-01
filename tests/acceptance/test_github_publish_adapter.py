@@ -14,6 +14,7 @@ from patchloop.github_publish import (
     BaseRevision,
     CommitFile,
     DraftPullRequest,
+    PullRequestState,
 )
 
 
@@ -214,6 +215,82 @@ def test_github_request_headers_never_expose_token_in_payload_or_url(
     assert cast(Mapping[str, str], observed["headers"])["Authorization"] == (
         "Bearer secret-token"
     )
+
+
+def test_github_adapter_reads_pr_lifecycle_and_fast_forwards_existing_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, object | None]] = []
+    responses: list[object] = [
+        [{"number": 7}],
+        {
+            "number": 7,
+            "html_url": "https://github.test/pull/7",
+            "state": "open",
+            "merged": False,
+            "draft": True,
+            "mergeable": True,
+            "base": {"ref": "main"},
+            "head": {"ref": "patchloop/issue-42", "sha": "active-sha"},
+        },
+        {},
+        {"number": 7, "html_url": "https://github.test/pull/7"},
+    ]
+
+    def urlopen(request: urllib.request.Request, timeout: int) -> FixtureResponse:
+        assert timeout == 30
+        payload = (
+            json.loads(cast(bytes, request.data))
+            if request.data is not None
+            else None
+        )
+        requests.append((request.get_method(), request.full_url, payload))
+        return FixtureResponse(responses.pop(0))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    client = GitHubApiClient(api_url="https://api.github.test", token="token")
+
+    state = client.pull_request_for_branch(
+        "octo-org/example", "patchloop/issue-42"
+    )
+    client.update_branch("octo-org/example", "patchloop/issue-42", "commit-sha")
+    updated = client.update_pull_request("octo-org/example", 7, "Updated body")
+
+    assert state == PullRequestState(
+        number=7,
+        url="https://github.test/pull/7",
+        state="open",
+        merged=False,
+        draft=True,
+        base_branch="main",
+        head_branch="patchloop/issue-42",
+        head_sha="active-sha",
+        mergeable=True,
+    )
+    assert updated == DraftPullRequest(7, "https://github.test/pull/7")
+    assert responses == []
+    assert requests == [
+        (
+            "GET",
+            "https://api.github.test/repos/octo-org/example/pulls?state=all&head=octo-org%3Apatchloop%2Fissue-42&per_page=100",
+            None,
+        ),
+        (
+            "GET",
+            "https://api.github.test/repos/octo-org/example/pulls/7",
+            None,
+        ),
+        (
+            "PATCH",
+            "https://api.github.test/repos/octo-org/example/git/refs/heads/patchloop%2Fissue-42",
+            {"force": False, "sha": "commit-sha"},
+        ),
+        (
+            "PATCH",
+            "https://api.github.test/repos/octo-org/example/pulls/7",
+            {"body": "Updated body"},
+        ),
+    ]
 
 
 def test_github_issue_feedback_uses_one_bounded_comment_request(

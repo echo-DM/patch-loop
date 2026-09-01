@@ -22,8 +22,10 @@ from patchloop.workflow import (
     main as workflow_main,
     run_agent,
     run_gate,
+    run_prepare,
     verify_artifact,
 )
+from patchloop.github_publish import PullRequestState
 
 
 ROOT = Path(__file__).parents[2]
@@ -50,6 +52,32 @@ class FixtureGitHubClient:
         return []
 
 
+class FixturePublicationClient:
+    def __init__(self, pull_request: PullRequestState | None, head: str | None) -> None:
+        self.pull_request = pull_request
+        self.head = head
+        self.comments: list[str] = []
+
+    def pull_request_for_branch(
+        self, repository: str, branch: str
+    ) -> PullRequestState | None:
+        assert repository == "octo-org/example"
+        assert branch == "patchloop/issue-42"
+        return self.pull_request
+
+    def branch_head(self, repository: str, branch: str) -> str | None:
+        assert repository == "octo-org/example"
+        assert branch == "patchloop/issue-42"
+        return self.head
+
+    def create_issue_comment(
+        self, repository: str, issue_number: int, body: str
+    ) -> None:
+        assert repository == "octo-org/example"
+        assert issue_number == 42
+        self.comments.append(body)
+
+
 def load_workflow(path: Path) -> dict[str, object]:
     return cast(dict[str, object], yaml.load(path.read_text(), Loader=yaml.BaseLoader))
 
@@ -70,7 +98,11 @@ def test_reusable_workflow_declares_explicit_inputs_secret_and_job_boundaries() 
 
     assert workflow["permissions"] == {"contents": "read"}
     jobs = cast(dict[str, object], workflow["jobs"])
-    assert set(jobs) == {"gate", "agent", "publish"}
+    assert workflow["concurrency"] == {
+        "group": "patchloop-${{ github.repository }}-${{ github.event.issue.number }}",
+        "cancel-in-progress": "false",
+    }
+    assert set(jobs) == {"gate", "prepare", "agent", "publish"}
     assert cast(dict[str, object], jobs["gate"])["permissions"] == {
         "contents": "read",
         "issues": "read",
@@ -78,14 +110,20 @@ def test_reusable_workflow_declares_explicit_inputs_secret_and_job_boundaries() 
     assert cast(dict[str, object], jobs["agent"])["permissions"] == {
         "contents": "read"
     }
+    assert cast(dict[str, object], jobs["prepare"])["permissions"] == {
+        "contents": "read",
+        "issues": "write",
+        "pull-requests": "read",
+    }
     assert cast(dict[str, object], jobs["publish"])["permissions"] == {
         "contents": "write",
         "issues": "write",
         "pull-requests": "write",
     }
     assert cast(dict[str, object], jobs["agent"])["if"] == (
-        "needs.gate.outputs.authorized == 'true'"
+        "needs.prepare.outputs.proceed == 'true'"
     )
+    assert cast(dict[str, object], jobs["agent"])["needs"] == ["gate", "prepare"]
     assert cast(dict[str, object], jobs["publish"])["if"] == (
         "needs.agent.result == 'success'"
     )
@@ -96,25 +134,31 @@ def test_secret_and_artifacts_follow_only_the_declared_job_path() -> None:
     workflow = load_workflow(WORKFLOW)
     jobs = cast(dict[str, object], workflow["jobs"])
     gate = cast(dict[str, object], jobs["gate"])
+    prepare = cast(dict[str, object], jobs["prepare"])
     agent = cast(dict[str, object], jobs["agent"])
     publish = cast(dict[str, object], jobs["publish"])
 
     assert "secrets: inherit" not in raw_workflow
     assert raw_workflow.count("${{ secrets.gemini_api_key }}") == 1
     assert "checkpoint" not in raw_workflow.lower()
-    assert raw_workflow.count("${{ job.workflow_repository }}") == 3
-    assert raw_workflow.count("${{ job.workflow_sha }}") == 3
+    assert raw_workflow.count("${{ job.workflow_repository }}") == 4
+    assert raw_workflow.count("${{ job.workflow_sha }}") == 4
     assert "github.workflow_ref" not in raw_workflow
     assert raw_workflow.count("pull-requests: write") == 1
-    assert raw_workflow.count("issues: write") == 1
+    assert raw_workflow.count("issues: write") == 2
     assert raw_workflow.count("contents: write") == 1
 
     gate_steps = cast(list[dict[str, object]], gate["steps"])
+    prepare_steps = cast(list[dict[str, object]], prepare["steps"])
     agent_steps = cast(list[dict[str, object]], agent["steps"])
     publish_steps = cast(list[dict[str, object]], publish["steps"])
     assert any(
         step.get("uses") == "actions/upload-artifact@v4" for step in gate_steps
     )
+    prepare_text = json.dumps(prepare, sort_keys=True)
+    assert "patchloop.workflow prepare" in prepare_text
+    assert "PATCHLOOP_GEMINI_API_KEY" not in prepare_text
+    assert "github.token" in prepare_text
     assert any(
         step.get("uses") == "actions/download-artifact@v4" for step in agent_steps
     )
@@ -137,6 +181,70 @@ def test_secret_and_artifacts_follow_only_the_declared_job_path() -> None:
     assert "github.event.repository.default_branch" in publish_text
     assert "git push" not in publish_text
     assert "run_checks" not in publish_text
+
+
+def test_prepare_selects_the_active_pr_branch_before_the_agent(tmp_path: Path) -> None:
+    client = FixturePublicationClient(
+        PullRequestState(
+            number=7,
+            url="https://example.test/pull/7",
+            state="open",
+            merged=False,
+            draft=True,
+            base_branch="main",
+            head_branch="patchloop/issue-42",
+            head_sha="active-sha",
+            mergeable=True,
+        ),
+        "active-sha",
+    )
+    github_output = tmp_path / "github-output"
+
+    plan = run_prepare(
+        repository="octo-org/example",
+        issue_number=42,
+        base_branch="main",
+        client=client,
+        github_output=github_output,
+    )
+
+    assert plan.action == "update"
+    assert github_output.read_text() == (
+        "proceed=true\ncheckout_ref=patchloop/issue-42\n"
+    )
+    assert client.comments == []
+
+
+def test_prepare_stops_closed_pr_before_the_agent_and_reports_it(
+    tmp_path: Path,
+) -> None:
+    client = FixturePublicationClient(
+        PullRequestState(
+            number=7,
+            url="https://example.test/pull/7",
+            state="closed",
+            merged=False,
+            draft=True,
+            base_branch="main",
+            head_branch="patchloop/issue-42",
+            head_sha="active-sha",
+            mergeable=False,
+        ),
+        None,
+    )
+    github_output = tmp_path / "github-output"
+
+    plan = run_prepare(
+        repository="octo-org/example",
+        issue_number=42,
+        base_branch="main",
+        client=client,
+        github_output=github_output,
+    )
+
+    assert plan.action == "blocked"
+    assert github_output.read_text() == "proceed=false\ncheckout_ref=\n"
+    assert "explicit restart" in client.comments[0]
 
 
 def test_minimal_caller_filters_the_label_and_serializes_runs_per_issue() -> None:

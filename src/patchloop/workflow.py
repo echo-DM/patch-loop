@@ -23,7 +23,13 @@ from patchloop.docker_verifier import DockerVerifierAdapter
 from patchloop.errors import ConfigError, InfrastructureError, PatchLoopError, TaskError
 from patchloop.gemini import GeminiPatchModelAdapter
 from patchloop.github_api import GitHubApiClient
-from patchloop.github_publish import run_publish
+from patchloop.github_publish import (
+    GitHubPublisher,
+    PublicationPlan,
+    report_publication_block,
+    resolve_publication,
+    run_publish,
+)
 from patchloop.sanitize import redact_text
 from patchloop.workflow_artifacts import (
     ArtifactIntegrityError,
@@ -152,6 +158,41 @@ def _comment_document(comment: IssueComment) -> FrozenCommentDocument:
     )
 
 
+def run_prepare(
+    *,
+    repository: str,
+    issue_number: int,
+    base_branch: str,
+    client: GitHubPublisher,
+    github_output: Path,
+    summary: Path | None = None,
+) -> PublicationPlan:
+    """Resolve durable PR state and select the repository ref before Agent edits."""
+    plan = resolve_publication(
+        repository=repository,
+        issue_number=issue_number,
+        base_branch=base_branch,
+        client=client,
+    )
+    proceed = plan.action in {"create", "update"}
+    checkout_ref = plan.branch if plan.action == "update" else base_branch
+    if not proceed:
+        checkout_ref = ""
+    with github_output.open("a") as stream:
+        stream.write(f"proceed={str(proceed).lower()}\n")
+        stream.write(f"checkout_ref={checkout_ref}\n")
+    if summary is not None:
+        with summary.open("a") as stream:
+            stream.write(
+                "## PatchLoop Prepare\n\n"
+                f"- Code: `{plan.code}`\n"
+                f"- Result: {plan.message}\n"
+            )
+    if plan.action == "blocked":
+        report_publication_block(client, repository, issue_number, plan)
+    return plan
+
+
 def run_agent(
     *,
     task_path: Path,
@@ -258,6 +299,12 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--issue", type=int, required=True)
     publish.add_argument("--base", required=True)
     publish.add_argument("--summary", type=Path)
+    prepare = commands.add_parser("prepare")
+    prepare.add_argument("--repository", required=True)
+    prepare.add_argument("--issue", type=int, required=True)
+    prepare.add_argument("--base", required=True)
+    prepare.add_argument("--github-output", type=Path, required=True)
+    prepare.add_argument("--summary", type=Path)
     gate = commands.add_parser("gate")
     gate.add_argument("--output", type=Path, required=True)
     gate.add_argument("--github-output", type=Path, required=True)
@@ -313,6 +360,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
                     token=os.environ.get("GITHUB_TOKEN", ""),
                 ),
+                summary=cast(Path | None, arguments.summary),
+            )
+        elif arguments.command == "prepare":
+            run_prepare(
+                repository=cast(str, arguments.repository),
+                issue_number=cast(int, arguments.issue),
+                base_branch=cast(str, arguments.base),
+                client=GitHubApiClient(
+                    api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+                    token=os.environ.get("GITHUB_TOKEN", ""),
+                ),
+                github_output=cast(Path, arguments.github_output),
                 summary=cast(Path | None, arguments.summary),
             )
         else:

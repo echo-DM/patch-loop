@@ -14,6 +14,7 @@ from patchloop.github_publish import (
     BaseFile,
     CommitFile,
     DraftPullRequest,
+    PullRequestState,
 )
 
 
@@ -75,6 +76,62 @@ class GitHubApiClient:
         self._post(
             f"{self._repository_path(repository)}/issues/{issue_number}/comments",
             {"body": body},
+        )
+
+    def pull_request_for_branch(
+        self, repository: str, branch: str
+    ) -> PullRequestState | None:
+        owner = repository.split("/", 1)[0]
+        query = urllib.parse.urlencode(
+            {
+                "state": "all",
+                "head": f"{owner}:{branch}",
+                "per_page": 100,
+            }
+        )
+        document = self._get(f"{self._repository_path(repository)}/pulls?{query}")
+        if not isinstance(document, list) or not all(
+            isinstance(item, dict) for item in document
+        ):
+            raise ValueError("GitHub pull request list must be an array of objects.")
+        if not document:
+            return None
+        listed = self._object(document[0], "GitHub pull request list entry")
+        number = self._positive_int(
+            listed.get("number"), "GitHub pull request number"
+        )
+        pull_request = self._object(
+            self._get(f"{self._repository_path(repository)}/pulls/{number}"),
+            "GitHub pull request response",
+        )
+        state = pull_request.get("state")
+        if state not in {"open", "closed"}:
+            raise ValueError("GitHub pull request state is invalid.")
+        merged = pull_request.get("merged")
+        draft = pull_request.get("draft")
+        mergeable = pull_request.get("mergeable")
+        if (
+            not isinstance(merged, bool)
+            or not isinstance(draft, bool)
+            or (mergeable is not None and not isinstance(mergeable, bool))
+        ):
+            raise ValueError("GitHub pull request lifecycle is invalid.")
+        base = self._object(pull_request.get("base"), "GitHub pull request base")
+        head = self._object(pull_request.get("head"), "GitHub pull request head")
+        return PullRequestState(
+            number=self._positive_int(
+                pull_request.get("number"), "GitHub pull request number"
+            ),
+            url=self._string(
+                pull_request.get("html_url"), "GitHub pull request URL"
+            ),
+            state=cast(Literal["open", "closed"], state),
+            merged=merged,
+            draft=draft,
+            base_branch=self._string(base.get("ref"), "GitHub pull request base"),
+            head_branch=self._string(head.get("ref"), "GitHub pull request head"),
+            head_sha=self._string(head.get("sha"), "GitHub pull request head SHA"),
+            mergeable=mergeable,
         )
 
     def base_revision(self, repository: str, branch: str) -> BaseRevision:
@@ -207,6 +264,15 @@ class GitHubApiClient:
             {"ref": f"refs/heads/{branch}", "sha": commit_sha},
         )
 
+    def update_branch(
+        self, repository: str, branch: str, commit_sha: str
+    ) -> None:
+        encoded_branch = urllib.parse.quote(branch, safe="")
+        self._patch(
+            f"{self._repository_path(repository)}/git/refs/heads/{encoded_branch}",
+            {"force": False, "sha": commit_sha},
+        )
+
     def create_draft_pull_request(
         self,
         repository: str,
@@ -239,6 +305,25 @@ class GitHubApiClient:
             url=self._string(pull_request.get("html_url"), "GitHub pull request URL"),
         )
 
+    def update_pull_request(
+        self, repository: str, number: int, body: str
+    ) -> DraftPullRequest:
+        pull_request = self._object(
+            self._patch(
+                f"{self._repository_path(repository)}/pulls/{number}",
+                {"body": body},
+            ),
+            "GitHub pull request response",
+        )
+        return DraftPullRequest(
+            number=self._positive_int(
+                pull_request.get("number"), "GitHub pull request number"
+            ),
+            url=self._string(
+                pull_request.get("html_url"), "GitHub pull request URL"
+            ),
+        )
+
     def delete_branch(self, repository: str, branch: str) -> None:
         encoded_branch = urllib.parse.quote(branch, safe="")
         self._request(
@@ -251,6 +336,9 @@ class GitHubApiClient:
 
     def _post(self, path: str, document: object) -> object:
         return self._request("POST", path, document)
+
+    def _patch(self, path: str, document: object) -> object:
+        return self._request("PATCH", path, document)
 
     def _request(
         self, method: str, path: str, document: object | None = None
@@ -287,6 +375,12 @@ class GitHubApiClient:
     def _string(value: object, label: str) -> str:
         if not isinstance(value, str) or not value:
             raise ValueError(f"{label} must be a non-empty string.")
+        return value
+
+    @staticmethod
+    def _positive_int(value: object, label: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{label} must be a positive integer.")
         return value
 
     @classmethod
