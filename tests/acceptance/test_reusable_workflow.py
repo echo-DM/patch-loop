@@ -478,6 +478,49 @@ def test_agent_setup_failure_still_emits_a_protected_terminal_summary(
         verify_artifact(output)
 
 
+def test_authorized_config_failure_preserves_publication_context(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    repository.joinpath(".patchloop.yml").write_text("version: 99\n")
+    event = cast(
+        dict[str, object],
+        json.loads(ROOT.joinpath("tests/fixtures/github/labeled_issue.json").read_text()),
+    )
+    gate = tmp_path / "gate"
+    run_gate(
+        event=event,
+        client=FixtureGitHubClient("write"),
+        output=gate,
+        github_output=tmp_path / "github-output",
+    )
+    output = tmp_path / "result"
+
+    exit_code = workflow_main(
+        [
+            "agent",
+            "--task",
+            str(gate / "task.json"),
+            "--repository",
+            str(repository),
+            "--config",
+            ".patchloop.yml",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    verified = verify_artifact(output)
+    assert cast(dict[str, object], verified["publication-context.json"])[
+        "task_id"
+    ] == "github:octo-org/example#42"
+    report = cast(dict[str, object], verified["run-report.json"])
+    assert cast(list[dict[str, object]], report["errors"])[0]["code"] == (
+        "unsupported_config_version"
+    )
+
+
 def configured_repository(tmp_path: Path) -> Path:
     repository = tmp_path / "repository"
     repository.mkdir()

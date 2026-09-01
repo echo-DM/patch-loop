@@ -270,10 +270,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "agent":
         task: EvaluationTask | None = None
         config: RepositoryConfig | None = None
+        publication_context: PublicationContextDocument | None = None
         try:
             repository = cast(Path, arguments.repository)
-            task, config, publication_context = _load_agent_inputs(
-                cast(Path, arguments.task), repository, cast(str, arguments.config)
+            task_path = cast(Path, arguments.task)
+            task = load_frozen_task(task_path)
+            publication_context = load_publication_context(task_path)
+            config = load_repository_config(
+                _repository_file(repository, cast(str, arguments.config))
             )
             _run_loaded_agent(
                 task=task,
@@ -290,6 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 error,
                 task_id=task.id if task is not None else None,
                 config=config,
+                publication_context=publication_context,
             )
         return 0
     try:

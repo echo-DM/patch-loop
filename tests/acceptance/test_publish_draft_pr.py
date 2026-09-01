@@ -40,6 +40,11 @@ class FixturePublisher:
     branch_heads: list[str | None] = field(default_factory=lambda: [None])
     base_mode: Literal["100644", "100755"] = "100644"
 
+    def create_issue_comment(
+        self, repository: str, issue_number: int, body: str
+    ) -> None:
+        self.requests.append(("create_issue_comment", repository, issue_number, body))
+
     def base_revision(self, repository: str, branch: str) -> BaseRevision:
         self.requests.append(("base_revision", repository, branch))
         return BaseRevision(commit_sha="base-sha", tree_sha="tree-sha")

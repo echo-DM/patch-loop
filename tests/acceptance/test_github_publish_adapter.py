@@ -214,3 +214,35 @@ def test_github_request_headers_never_expose_token_in_payload_or_url(
     assert cast(Mapping[str, str], observed["headers"])["Authorization"] == (
         "Bearer secret-token"
     )
+
+
+def test_github_issue_feedback_uses_one_bounded_comment_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, str, object | None]] = []
+
+    def urlopen(request: urllib.request.Request, timeout: int) -> FixtureResponse:
+        assert timeout == 30
+        requests.append(
+            (
+                request.get_method(),
+                request.full_url,
+                json.loads(cast(bytes, request.data)),
+            )
+        )
+        return FixtureResponse({"id": 123})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    client = GitHubApiClient(api_url="https://api.github.test", token="token")
+
+    client.create_issue_comment(
+        "octo-org/example", 42, "PatchLoop needs clarification."
+    )
+
+    assert requests == [
+        (
+            "POST",
+            "https://api.github.test/repos/octo-org/example/issues/42/comments",
+            {"body": "PatchLoop needs clarification."},
+        )
+    ]

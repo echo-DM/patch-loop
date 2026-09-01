@@ -92,6 +92,7 @@ def write_agent_failure_artifact(
     *,
     task_id: str | None = None,
     config: RepositoryConfig | None = None,
+    publication_context: PublicationContextDocument | None = None,
 ) -> None:
     """Preserve a sanitized terminal report when Agent setup cannot start core.run."""
     if isinstance(error, ConfigError):
@@ -164,13 +165,13 @@ def write_agent_failure_artifact(
         "publication": publication,
         "errors": [error_document],
     }
-    write_artifact(
-        output,
-        {
-            "run-report.json": json_bytes(report),
-            "publication-intent.json": json_bytes(publication),
-        },
-    )
+    payloads = {
+        "run-report.json": json_bytes(report),
+        "publication-intent.json": json_bytes(publication),
+    }
+    if publication_context is not None:
+        payloads["publication-context.json"] = json_bytes(publication_context)
+    write_artifact(output, payloads)
 
 
 def verify_artifact(

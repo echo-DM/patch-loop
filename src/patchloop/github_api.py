@@ -69,6 +69,14 @@ class GitHubApiClient:
                 return comments
             page += 1
 
+    def create_issue_comment(
+        self, repository: str, issue_number: int, body: str
+    ) -> None:
+        self._post(
+            f"{self._repository_path(repository)}/issues/{issue_number}/comments",
+            {"body": body},
+        )
+
     def base_revision(self, repository: str, branch: str) -> BaseRevision:
         commit_sha = self.branch_head(repository, branch)
         if commit_sha is None:

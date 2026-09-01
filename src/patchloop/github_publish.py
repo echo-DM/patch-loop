@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from patchloop.errors import InfrastructureError
+from patchloop.publication_feedback import no_patch_feedback, validate_no_patch_outcome
 from patchloop.publication_patch import FilePatch, apply_file_patch, validate_patch
 from patchloop.publication_report import pull_request_body
 from patchloop.workflow_artifacts import (
@@ -47,6 +48,10 @@ class DraftPullRequest:
 
 
 class GitHubPublisher(Protocol):
+    def create_issue_comment(
+        self, repository: str, issue_number: int, body: str
+    ) -> None: ...
+
     def base_revision(self, repository: str, branch: str) -> BaseRevision: ...
 
     def base_files(
@@ -96,12 +101,30 @@ def run_publish(
     publication = _mapping(
         verified.get("publication-intent.json"), "publication intent"
     )
-    if publication.get("intent") != "draft_pr":
-        return None
     context = _mapping(
         verified.get("publication-context.json"), "publication context"
     )
-    _validate_identity(report, context, repository, issue_number, base_branch)
+    _validate_context_identity(report, context, repository, issue_number, base_branch)
+    if publication.get("intent") != "draft_pr":
+        validate_no_patch_outcome(report, publication)
+        body = no_patch_feedback(report, publication)
+        if summary is not None:
+            append_run_summary(summary, report)
+        try:
+            client.create_issue_comment(repository, issue_number, body)
+        except Exception as error:
+            if summary is not None:
+                with summary.open("a") as stream:
+                    stream.write(
+                        "\n- Issue feedback: failed "
+                        "(`github_issue_feedback_failed`; no automatic retry)\n"
+                    )
+            raise InfrastructureError(
+                "github_issue_feedback_failed",
+                "Publish could not add the bounded outcome feedback to the Issue.",
+            ) from error
+        return None
+    _validate_draft_pr_identity(report)
     patch = verified.get("patch.diff")
     if not isinstance(patch, str) or not patch:
         raise ArtifactIntegrityError("Draft PR publication requires a non-empty patch.")
@@ -224,7 +247,7 @@ def _handle_uncertain_branch_creation(
     ) from original_error
 
 
-def _validate_identity(
+def _validate_context_identity(
     report: Mapping[str, object],
     context: Mapping[str, object],
     repository: str,
@@ -247,6 +270,10 @@ def _validate_identity(
         raise ArtifactIntegrityError(
             "Artifact publication context does not match the Publish request."
         )
+    _validate_branch(base_branch)
+
+
+def _validate_draft_pr_identity(report: Mapping[str, object]) -> None:
     if report.get("terminal_outcome") != "pr_created":
         raise ArtifactIntegrityError("Draft PR intent has an invalid terminal outcome.")
     verification = _mapping(report.get("verification"), "verification report")
@@ -258,7 +285,6 @@ def _validate_identity(
         raise ArtifactIntegrityError(
             "Draft PR intent has an invalid verification status."
         )
-    _validate_branch(base_branch)
 
 
 def _validate_branch(branch: str) -> None:

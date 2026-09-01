@@ -130,7 +130,7 @@ jobs:
         with:
           name: patchloop-result
           path: result
-      - name: Validate result and create Draft PR
+      - name: Publish Issue feedback or Draft PR
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
