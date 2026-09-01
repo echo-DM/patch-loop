@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -277,6 +278,15 @@ def resolve_publication(
     branch = f"patchloop/issue-{issue_number}"
     try:
         pull_request = client.pull_request_for_branch(repository, branch)
+        if (
+            pull_request is not None
+            and pull_request.state == "open"
+            and not pull_request.merged
+            and pull_request.mergeable is None
+        ):
+            pull_request = _poll_mergeability(
+                client, repository, branch, pull_request
+            )
         if pull_request is not None and pull_request.merged:
             return PublicationPlan(
                 "complete",
@@ -356,6 +366,23 @@ def resolve_publication(
         "github_pull_request_active",
         "PatchLoop will append an ordinary commit to the active Draft PR.",
     )
+
+
+def _poll_mergeability(
+    client: GitHubPublisher,
+    repository: str,
+    branch: str,
+    pull_request: PullRequestState,
+) -> PullRequestState:
+    for delay in (1.0, 2.0):
+        time.sleep(delay)
+        refreshed = client.pull_request_for_branch(repository, branch)
+        if refreshed is None or refreshed.number != pull_request.number:
+            raise ValueError("GitHub pull request changed during mergeability polling.")
+        pull_request = refreshed
+        if pull_request.mergeable is not None:
+            break
+    return pull_request
 
 
 def report_publication_block(

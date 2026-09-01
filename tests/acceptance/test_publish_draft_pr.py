@@ -336,6 +336,37 @@ def test_conflicted_active_pr_is_reported_without_changing_the_branch(
     assert not any(request[0] == "create_commit" for request in publisher.requests)
 
 
+def test_transient_unknown_mergeability_is_polled_before_updating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    delays: list[float] = []
+    monkeypatch.setattr("patchloop.github_publish.time.sleep", delays.append)
+    publisher = FixturePublisher(
+        [],
+        pull_requests=[
+            pull_request_state(mergeable=None),
+            pull_request_state(mergeable=True),
+        ],
+        branch_heads=["active-sha"],
+    )
+
+    result = run_publish(
+        artifact=checked_artifact(tmp_path, "checks_passed"),
+        repository="octo-org/example",
+        issue_number=42,
+        base_branch="main",
+        client=publisher,
+    )
+
+    assert result == DraftPullRequest(7, "https://example.test/pull/7")
+    assert delays == [1.0]
+    assert [request[0] for request in publisher.requests[:3]] == [
+        "pull_request_for_branch",
+        "pull_request_for_branch",
+        "branch_head",
+    ]
+
+
 @pytest.mark.parametrize(
     ("base_branch", "head_branch", "head_sha", "branch_head"),
     [
