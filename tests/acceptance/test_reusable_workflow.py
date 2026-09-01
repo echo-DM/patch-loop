@@ -264,7 +264,9 @@ def test_minimal_caller_filters_the_label_and_serializes_runs_per_issue() -> Non
     jobs = cast(dict[str, object], caller["jobs"])
     call = cast(dict[str, object], jobs["patchloop"])
     assert call["if"] == "github.event.label.name == 'patchloop'"
-    assert call["uses"] == "OWNER/patchloop/.github/workflows/patchloop-reusable.yml@v1"
+    assert call["uses"] == (
+        "echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@v0.1.0"
+    )
     assert call["with"] == {
         "event_json": "${{ toJson(github.event) }}",
         "config_path": ".patchloop.yml",

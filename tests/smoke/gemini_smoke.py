@@ -13,6 +13,8 @@ from patchloop.gemini import GeminiPatchModelAdapter
 def test_live_gemini_adapter_returns_a_controlled_turn() -> None:
     if os.environ.get("PATCHLOOP_RUN_GEMINI_SMOKE") != "1":
         pytest.skip("Set PATCHLOOP_RUN_GEMINI_SMOKE=1 to call the live Gemini API.")
+    if not os.environ.get("PATCHLOOP_GEMINI_API_KEY", "").strip():
+        pytest.skip("Live Gemini smoke requires PATCHLOOP_GEMINI_API_KEY.")
     adapter = GeminiPatchModelAdapter.from_environment(DEFAULT_MODEL)
 
     turn = adapter.next_turn(
