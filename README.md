@@ -219,3 +219,7 @@ See [Gemini integration](docs/gemini.md), [Security](docs/security.md), and the
 [54-story coverage matrix](docs/user-story-coverage.md). Actual release
 acceptance and creation of `v0.1.0` are tracked separately by
 [Ticket 14](.scratch/patchloop-mvp/issues/14-release-v0.1.0-with-live-smoke.md).
+
+## License
+
+PatchLoop is released under the [MIT License](LICENSE).

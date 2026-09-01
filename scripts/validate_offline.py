@@ -74,6 +74,22 @@ def validate_built_cli(temporary: Path) -> None:
             str(wheels[0]),
         ],
     )
+    license_expression = subprocess.run(
+        [
+            str(environment / "bin" / "python"),
+            "-c",
+            (
+                "from importlib.metadata import metadata; "
+                "print(metadata('patchloop').get('License-Expression', ''))"
+            ),
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if license_expression != "MIT":
+        raise RuntimeError("Built wheel does not declare the MIT license.")
     repository = temporary / "target"
     repository.mkdir()
     repository.joinpath("README.md").write_text("Offline wheel validation.\n")
