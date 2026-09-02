@@ -14,6 +14,7 @@ ROOT = Path(__file__).parents[2]
 EXAMPLE_CONFIG = ROOT / "examples" / "patchloop.yml"
 EXAMPLE_TASK = ROOT / "examples" / "local-task.json"
 SMOKE_CALLER = ROOT / "examples" / "patchloop-smoke-caller.yml"
+SMOKE_CONFIG = ROOT / "examples" / "patchloop-smoke.yml"
 
 
 def test_documented_local_example_runs_through_the_cli(
@@ -119,6 +120,37 @@ def test_live_smoke_template_uses_a_candidate_sha_and_read_only_inspection() -> 
     steps = cast(list[dict[str, object]], inspection["steps"])
     checkout = cast(dict[str, object], steps[0]["with"])
     assert checkout["ref"] == str(patchloop["uses"]).rsplit("@", 1)[1]
+
+
+def test_live_smoke_fixture_config_runs_through_the_cli(tmp_path: Path) -> None:
+    repository = tmp_path / "smoke-repository"
+    repository.mkdir()
+    repository.joinpath("README.md").write_text(
+        "Release smoke fixture: pending.\n"
+    )
+    shutil.copyfile(SMOKE_CONFIG, repository / ".patchloop.yml")
+
+    completed = subprocess.run(
+        [
+            "patchloop",
+            "run",
+            "--task",
+            str(EXAMPLE_TASK),
+            "--repository",
+            str(repository),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    report = json.loads(completed.stdout)
+    assert report["terminal_outcome"] == "no_change"
+    assert report["verification"]["configured_checks"] == [
+        "grep -Fxq 'Release smoke fixture: passed.' README.md"
+    ]
 
 
 def test_coverage_matrix_accounts_for_each_spec_story_once() -> None:

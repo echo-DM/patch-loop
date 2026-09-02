@@ -206,9 +206,12 @@ Live smoke is separate, explicit, and release-gated:
   `PATCHLOOP_RUN_GEMINI_SMOKE=1` and `PATCHLOOP_GEMINI_API_KEY`.
 - [Dedicated GitHub smoke caller](examples/patchloop-smoke-caller.yml) must be
   installed in a private Smoke repository such as `echo-DM/patch-loop-smoke`,
-  with both placeholder refs replaced by the same candidate commit SHA. Set the
-  repository variable `PATCHLOOP_RUN_LIVE_SMOKE=1`; without that explicit flag
-  or the named Gemini Secret, preflight safely skips the credentialed jobs.
+  together with [the smoke fixture configuration](examples/patchloop-smoke.yml)
+  as `.patchloop.yml`, with both placeholder refs replaced by the same candidate
+  commit SHA. The fixture Issue asks for the exact README line
+  `Release smoke fixture: pending.` to become `Release smoke fixture: passed.`.
+  Set the repository variable `PATCHLOOP_RUN_LIVE_SMOKE=1`; without that explicit
+  flag or the named Gemini Secret, preflight safely skips the credentialed jobs.
 - [GitHub state inspection](tests/smoke/github_smoke.py) runs after the reusable
   workflow with the caller repository's automatic `GITHUB_TOKEN`; it verifies
   that the expected Draft PR exists and never receives the Gemini secret.

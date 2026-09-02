@@ -1,0 +1,19 @@
+version: 1
+model: gemma-4-31b-it
+verifier:
+  image: alpine:3.22
+  setup:
+    - test -f README.md
+  checks:
+    - "grep -Fxq 'Release smoke fixture: passed.' README.md"
+  limits:
+    timeout_seconds: 60
+    memory_mb: 128
+    pids: 64
+    output_bytes: 20000
+budgets:
+  max_iterations: 2
+  max_tool_calls: 20
+  max_changed_files: 1
+  max_diff_lines: 40
+  max_wall_time_minutes: 10

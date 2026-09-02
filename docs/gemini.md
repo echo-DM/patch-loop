@@ -65,9 +65,12 @@ The smoke test also requires `PATCHLOOP_GEMINI_API_KEY`. Do not put the key in
 
 If the enable flag or dedicated key is absent, the smoke test skips without
 calling the provider. The complete GitHub smoke uses a private Smoke repository:
-copy `examples/patchloop-smoke-caller.yml`, replace both candidate placeholders
-with the same reviewed commit SHA, set `PATCHLOOP_RUN_LIVE_SMOKE=1` as a
-repository variable, and configure `PATCHLOOP_GEMINI_API_KEY` as an Actions
-secret. Without both readiness signals, preflight skips the credentialed jobs.
+copy `examples/patchloop-smoke-caller.yml`, copy
+`examples/patchloop-smoke.yml` as `.patchloop.yml`, replace both candidate
+placeholders with the same reviewed commit SHA, set
+`PATCHLOOP_RUN_LIVE_SMOKE=1` as a repository variable, and configure
+`PATCHLOOP_GEMINI_API_KEY` as an Actions secret. The versioned fixture quotes
+its full `grep` command so the colon in the expected README line remains a YAML
+string. Without both readiness signals, preflight skips the credentialed jobs.
 The inspection Job uses only the automatic `GITHUB_TOKEN` and never receives the
 Gemini key. See the root README and Ticket 14 for the release gate.
