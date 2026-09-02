@@ -3,10 +3,6 @@ name: PatchLoop reusable workflow
 on:
   workflow_call:
     inputs:
-      event_json:
-        description: Serialized issues/labeled event from the caller repository
-        required: true
-        type: string
       config_path:
         description: Repository-relative PatchLoop configuration path
         required: false
@@ -49,9 +45,9 @@ jobs:
         id: gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          PATCHLOOP_EVENT_JSON: ${{ inputs.event_json }}
         run: >-
           uv run --project _patchloop python -m patchloop.workflow gate
+          --event "$GITHUB_EVENT_PATH"
           --output gate --github-output "$GITHUB_OUTPUT"
           --summary "$GITHUB_STEP_SUMMARY"
       - name: Upload frozen task

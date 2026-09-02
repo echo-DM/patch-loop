@@ -17,8 +17,9 @@
 
 ## Answer
 
-已完成 Ticket 09。`.github/workflows/patchloop-reusable.yml` 通过显式
-`event_json`、`config_path` 和命名 `gemini_api_key` 连接三个独立 Job。Gate
+已完成 Ticket 09。`.github/workflows/patchloop-reusable.yml` 通过 runner 自带的
+`GITHUB_EVENT_PATH`、显式 `config_path` 和命名 `gemini_api_key` 连接三个独立
+Job。Gate
 只有 Issue/仓库读取权限，使用调用仓库的 `GITHUB_TOKEN` 验证触发者并冻结、
 脱敏任务；拒绝结果令 Agent Job 条件为 false。Agent 只有仓库读取权限，Gemini
 secret 只注入受控执行步，目标 setup/checks 仍由无秘密的 Docker verifier 执行，

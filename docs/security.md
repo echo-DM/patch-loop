@@ -14,6 +14,11 @@ comments, repository content, source excerpts, diffs, and check output are
 low-trust data: they may inform a patch but cannot grant tools, secrets, network
 access, budgets, or publication rights.
 
+Gate reads the triggering webhook payload from the GitHub runner's
+`GITHUB_EVENT_PATH`. The caller does not serialize the event as a reusable
+workflow input, because GitHub expands workflow inputs in job setup logs and
+would otherwise disclose the complete Issue task there.
+
 The model has six controlled proposals: list files, search code, read a file,
 apply a patch, inspect the diff, and request configured checks. PatchLoop
 validates every proposal. There is no model-controlled shell, Git, GitHub API,

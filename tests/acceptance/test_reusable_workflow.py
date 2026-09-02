@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 import yaml
 
+import patchloop.workflow as workflow_module
 from patchloop.adapters import (
     DeterministicPatchModelAdapter,
     DeterministicVerifierAdapter,
@@ -90,8 +91,7 @@ def test_reusable_workflow_declares_explicit_inputs_secret_and_job_boundaries() 
     inputs = cast(dict[str, object], workflow_call["inputs"])
     secrets = cast(dict[str, object], workflow_call["secrets"])
 
-    assert set(inputs) == {"event_json", "config_path"}
-    assert cast(dict[str, str], inputs["event_json"])["required"] == "true"
+    assert set(inputs) == {"config_path"}
     assert cast(dict[str, str], inputs["config_path"])["default"] == ".patchloop.yml"
     assert set(secrets) == {"gemini_api_key"}
     assert cast(dict[str, str], secrets["gemini_api_key"])["required"] == "true"
@@ -107,6 +107,14 @@ def test_reusable_workflow_declares_explicit_inputs_secret_and_job_boundaries() 
         "contents": "read",
         "issues": "read",
     }
+    gate_steps = cast(
+        list[dict[str, object]], cast(dict[str, object], jobs["gate"])["steps"]
+    )
+    gate_step = next(
+        step for step in gate_steps if step.get("name") == "Authorize and freeze Issue"
+    )
+    assert gate_step["env"] == {"GITHUB_TOKEN": "${{ github.token }}"}
+    assert '--event "$GITHUB_EVENT_PATH"' in str(gate_step["run"])
     assert cast(dict[str, object], jobs["agent"])["permissions"] == {
         "contents": "read"
     }
@@ -267,10 +275,7 @@ def test_minimal_caller_filters_the_label_and_serializes_runs_per_issue() -> Non
     assert call["uses"] == (
         "echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@v0.1.0"
     )
-    assert call["with"] == {
-        "event_json": "${{ toJson(github.event) }}",
-        "config_path": ".patchloop.yml",
-    }
+    assert call["with"] == {"config_path": ".patchloop.yml"}
     assert call["secrets"] == {
         "gemini_api_key": "${{ secrets.PATCHLOOP_GEMINI_API_KEY }}"
     }
@@ -310,6 +315,57 @@ def test_gate_freezes_only_an_authorized_issue_for_the_agent(tmp_path: Path) -> 
         "task_id": "github:octo-org/example#42",
     }
     assert output.joinpath("manifest.json").is_file()
+
+
+def test_gate_cli_reads_the_runner_event_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event_path = ROOT / "tests" / "fixtures" / "github" / "labeled_issue.json"
+    output = tmp_path / "gate"
+    github_output = tmp_path / "github-output"
+    monkeypatch.setattr(
+        workflow_module,
+        "GitHubApiClient",
+        lambda **_kwargs: FixtureGitHubClient("write"),
+    )
+
+    exit_code = workflow_main(
+        [
+            "gate",
+            "--event",
+            str(event_path),
+            "--output",
+            str(output),
+            "--github-output",
+            str(github_output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert github_output.read_text() == "authorized=true\n"
+    task = json.loads(output.joinpath("task.json").read_text())
+    assert task["id"] == "github:octo-org/example#42"
+
+
+def test_gate_cli_rejects_an_unreadable_runner_event_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing_event = tmp_path / "missing-event.json"
+
+    exit_code = workflow_main(
+        [
+            "gate",
+            "--event",
+            str(missing_event),
+            "--output",
+            str(tmp_path / "gate"),
+            "--github-output",
+            str(tmp_path / "github-output"),
+        ]
+    )
+
+    assert exit_code == 1
+    assert capsys.readouterr().err == "The GitHub event file is not readable.\n"
 
 
 def test_gate_redacts_credential_shaped_issue_content_before_artifact_transfer(

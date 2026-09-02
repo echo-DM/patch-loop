@@ -38,7 +38,6 @@ jobs:
     if: needs.preflight.outputs.enabled == 'true'
     uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@REPLACE_WITH_CANDIDATE_SHA
     with:
-      event_json: ${{ toJson(github.event) }}
       config_path: .patchloop.yml
     secrets:
       gemini_api_key: ${{ secrets.PATCHLOOP_GEMINI_API_KEY }}

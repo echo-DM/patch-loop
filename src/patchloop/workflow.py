@@ -306,6 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--github-output", type=Path, required=True)
     prepare.add_argument("--summary", type=Path)
     gate = commands.add_parser("gate")
+    gate.add_argument("--event", type=Path, required=True)
     gate.add_argument("--output", type=Path, required=True)
     gate.add_argument("--github-output", type=Path, required=True)
     gate.add_argument("--summary", type=Path)
@@ -375,7 +376,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 summary=cast(Path | None, arguments.summary),
             )
         else:
-            raw_event = os.environ.get("PATCHLOOP_EVENT_JSON", "")
+            try:
+                raw_event = cast(Path, arguments.event).read_text()
+            except OSError as error:
+                raise TaskError(
+                    "invalid_event", "The GitHub event file is not readable."
+                ) from error
             event = json.loads(raw_event)
             if not isinstance(event, dict):
                 raise TaskError("invalid_event", "The GitHub event must be a JSON object.")
