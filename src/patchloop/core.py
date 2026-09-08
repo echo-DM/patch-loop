@@ -426,14 +426,14 @@ def _run_patch(
             }
             break
         if turn.decision is not None:
+            provider_failure = _provider_failure_event(turn.decision)
+            if provider_failure is not None:
+                if provider_retry_error is None:
+                    provider_retry_error = provider_failure
+                    continue
+                error = provider_retry_error
+                break
             if tools.patch_bundle() is not None:
-                provider_failure = _provider_failure_event(turn.decision)
-                if provider_failure is not None:
-                    if provider_retry_error is None:
-                        provider_retry_error = provider_failure
-                        continue
-                    error = provider_retry_error
-                    break
                 error = {
                     "category": "model",
                     "code": "decision_after_edit",

@@ -158,7 +158,7 @@ def test_provider_failures_are_stable_and_redacted(
     expected_code: str,
 ) -> None:
     repository = configured_repository(tmp_path)
-    client = FakeGeminiClient([provider_error])
+    client = FakeGeminiClient([provider_error, provider_error])
 
     result = run_gemini(repository, client)
 
@@ -174,7 +174,42 @@ def test_provider_failures_are_stable_and_redacted(
             }[expected_code],
         }
     ]
+    assert len(client.requests) == 2
     assert "AIzaSySecret" not in str(result.report)
+
+
+def test_initial_provider_failure_retries_the_pending_turn(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    client = FakeGeminiClient(
+        [
+            RuntimeError("AIzaSySecretInitialProvider123456789"),
+            FakeResponse(
+                tool_calls=[
+                    {
+                        "id": "edit",
+                        "name": "apply_patch",
+                        "args": {
+                            "path": "README.md",
+                            "content": "Recovered initial request.\n",
+                        },
+                    },
+                    {"id": "checks", "name": "run_checks", "args": {}},
+                ]
+            ),
+        ]
+    )
+
+    result = run_gemini(repository, client)
+
+    assert result.terminal_outcome == "pr_created"
+    assert repository.joinpath("README.md").read_text() == (
+        "Recovered initial request.\n"
+    )
+    assert result.report["verification"]["status"] == "checks_passed"
+    assert len(client.requests) == 2
+    assert len(client.requests[0]) == len(client.requests[1])
+    assert "AIzaSySecret" not in str(result.report)
+    assert "AIzaSySecret" not in str(client.requests)
 
 
 def test_provider_failure_after_edit_retries_the_pending_turn(
