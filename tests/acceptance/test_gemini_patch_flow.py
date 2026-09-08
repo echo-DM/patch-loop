@@ -177,6 +177,91 @@ def test_provider_failures_are_stable_and_redacted(
     assert "AIzaSySecret" not in str(result.report)
 
 
+def test_provider_failure_after_edit_retries_the_pending_turn(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    client = FakeGeminiClient(
+        [
+            FakeResponse(
+                tool_calls=[
+                    {
+                        "id": "edit",
+                        "name": "apply_patch",
+                        "args": {
+                            "path": "README.md",
+                            "content": "Recovered after provider failure.\n",
+                        },
+                    },
+                ]
+            ),
+            RuntimeError("AIzaSySecretTransientProvider123456789"),
+            FakeResponse(
+                tool_calls=[
+                    {"id": "checks", "name": "run_checks", "args": {}},
+                ]
+            ),
+        ]
+    )
+
+    result = run_gemini(repository, client)
+
+    assert result.terminal_outcome == "pr_created"
+    assert repository.joinpath("README.md").read_text() == (
+        "Recovered after provider failure.\n"
+    )
+    assert result.report["verification"]["status"] == "checks_passed"
+    assert result.report["errors"] == []
+    assert len(client.requests) == 3
+    assert len(client.requests[1]) == len(client.requests[2])
+    assert "AIzaSySecret" not in str(result.report)
+    assert "AIzaSySecret" not in str(client.requests)
+
+
+def test_repeated_provider_failure_after_edit_preserves_the_provider_error(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    client = FakeGeminiClient(
+        [
+            FakeResponse(
+                tool_calls=[
+                    {
+                        "id": "edit",
+                        "name": "apply_patch",
+                        "args": {
+                            "path": "README.md",
+                            "content": "Unverified provider recovery.\n",
+                        },
+                    },
+                ]
+            ),
+            RuntimeError("AIzaSySecretFirstProvider123456789"),
+            RuntimeError("AIzaSySecretSecondProvider123456789"),
+        ]
+    )
+
+    result = run_gemini(repository, client)
+
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.report["errors"] == [
+        {
+            "category": "model",
+            "code": "provider_error",
+            "message": "The Gemini provider could not complete the request.",
+        }
+    ]
+    assert repository.joinpath("README.md").read_text() == (
+        "Unverified provider recovery.\n"
+    )
+    assert len(client.requests) == 3
+    assert len(client.requests[1]) == len(client.requests[2])
+    assert "decision_after_edit" not in str(result.report)
+    assert "AIzaSySecret" not in str(result.report)
+    assert "AIzaSySecret" not in str(client.requests)
+
+
 def test_plain_text_is_a_stable_completion_without_persisting_raw_context(
     tmp_path: Path,
 ) -> None:

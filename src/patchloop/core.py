@@ -404,6 +404,7 @@ def _run_patch(
     tool_calls = 0
     completion = None
     error: ReportEvent | None = None
+    provider_retry_error: ReportEvent | None = None
     for _ in range(config.budgets.max_tool_calls + 1):
         if (error := check_wall_time()) is not None:
             break
@@ -426,6 +427,13 @@ def _run_patch(
             break
         if turn.decision is not None:
             if tools.patch_bundle() is not None:
+                provider_failure = _provider_failure_event(turn.decision)
+                if provider_failure is not None:
+                    if provider_retry_error is None:
+                        provider_retry_error = provider_failure
+                        continue
+                    error = provider_retry_error
+                    break
                 error = {
                     "category": "model",
                     "code": "decision_after_edit",
@@ -672,6 +680,25 @@ def _passing_checks_completion(tools: ControlledTools) -> PatchCompletion | None
         "PatchLoop produced a patch that passes the configured checks.",
         "Review the generated Draft PR.",
     )
+
+
+def _provider_failure_event(
+    decision: EvaluationDecision,
+) -> ReportEvent | None:
+    if decision.terminal_outcome != "failed" or len(decision.errors) != 1:
+        return None
+    event = decision.errors[0]
+    if event.get("category") != "model" or event.get("code") not in {
+        "provider_timeout",
+        "provider_rate_limited",
+        "provider_error",
+    }:
+        return None
+    return {
+        "category": event["category"],
+        "code": event["code"],
+        "message": event["message"],
+    }
 
 
 def _wall_time_failure(

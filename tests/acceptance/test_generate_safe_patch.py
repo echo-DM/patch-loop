@@ -268,6 +268,48 @@ def test_patch_model_can_stop_for_clarification_without_editing(tmp_path: Path) 
     assert (repository / "README.md").read_text() == "Hello, world!\n"
 
 
+def test_patch_model_decision_after_edit_remains_invalid(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    model = DeterministicPatchModelAdapter(
+        (
+            ModelTurn(
+                tool_calls=(
+                    ToolCall(
+                        "edit",
+                        "apply_patch",
+                        {"path": "README.md", "content": "Edited content.\n"},
+                    ),
+                )
+            ),
+            ModelTurn.decide(
+                EvaluationDecision(
+                    terminal_outcome="no_change",
+                    summary="No change is needed.",
+                    actionable_message="Close the issue.",
+                )
+            ),
+        )
+    )
+
+    result = run(
+        RunRequest(
+            task=TaskSnapshot("issue-108", "Change greeting", "Make it better."),
+            repository=repository,
+            config=load_repository_config(repository / ".patchloop.yml"),
+            adapters=RunAdapters(
+                model=model,
+                verifier=DeterministicVerifierAdapter(
+                    VerificationResult.passed(("check greeting",))
+                ),
+            ),
+        )
+    )
+
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.report["errors"][0]["code"] == "decision_after_edit"
+
+
 def test_replacing_a_hard_link_does_not_write_outside_workspace(
     tmp_path: Path,
 ) -> None:

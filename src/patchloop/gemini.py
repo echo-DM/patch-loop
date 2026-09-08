@@ -87,11 +87,13 @@ class GeminiPatchModelAdapter:
         available_tools: tuple[ToolDefinition, ...],
     ) -> ModelTurn:
         self._bind_tools(available_tools)
+        message_count = len(self._messages)
         self._append_input(task, observations)
         assert self._bound_client is not None
         try:
             response = self._bound_client.invoke(list(self._messages))
         except Exception as error:
+            del self._messages[message_count:]
             return ModelTurn.decide(self._provider_failure(error))
         turn, history_message = self._translate_response(response)
         self._messages.append(history_message)
