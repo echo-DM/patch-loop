@@ -140,7 +140,11 @@ def _parse_patch(patch: str) -> tuple[FilePatch, ...]:
             hunk_lines: list[str] = []
             seen_old = 0
             seen_new = 0
-            while index < len(lines) and lines[index][:1] in {" ", "+", "-"}:
+            while (
+                index < len(lines)
+                and lines[index][:1] in {" ", "+", "-"}
+                and (seen_old < old_count or seen_new < new_count)
+            ):
                 line = lines[index]
                 hunk_lines.append(line)
                 if line[0] in {" ", "-"}:

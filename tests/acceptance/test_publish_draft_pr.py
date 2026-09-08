@@ -7,6 +7,7 @@ from typing import Literal
 
 import pytest
 
+from patchloop.controlled_tools import diff_line_count
 from patchloop.errors import InfrastructureError
 from patchloop.github_publish import (
     BaseFile,
@@ -26,6 +27,19 @@ from patchloop.workflow_artifacts import (
 PATCH = """\
 --- a/README.md
 +++ b/README.md
+@@ -1 +1 @@
+-Hello, world!
++Hello from PatchLoop!
+"""
+
+MULTI_FILE_PATCH = """\
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-Hello, world!
++Hello from PatchLoop!
+--- a/NOTES.md
++++ b/NOTES.md
 @@ -1 +1 @@
 -Hello, world!
 +Hello from PatchLoop!
@@ -195,6 +209,30 @@ def test_valid_checked_patch_creates_controlled_branch_commit_and_draft_pr(
     assert "1 / 3" in body
     assert "Relates to #42" in body
     assert "not a substitute for the repository's complete CI" in body
+
+
+def test_valid_multi_file_patch_preserves_file_boundaries(tmp_path: Path) -> None:
+    publisher = FixturePublisher([])
+
+    result = run_publish(
+        artifact=checked_artifact(
+            tmp_path,
+            "checks_passed",
+            patch=MULTI_FILE_PATCH,
+            changed_paths=["README.md", "NOTES.md"],
+        ),
+        repository="octo-org/example",
+        issue_number=42,
+        base_branch="main",
+        client=publisher,
+    )
+
+    assert result == DraftPullRequest(number=7, url="https://example.test/pull/7")
+    assert publisher.requests[3][-1] == ("README.md", "NOTES.md")
+    assert publisher.requests[4][3] == (
+        CommitFile("README.md", b"Hello from PatchLoop!\n", "100644"),
+        CommitFile("NOTES.md", b"Hello from PatchLoop!\n", "100644"),
+    )
 
 
 def test_active_draft_pr_appends_an_ordinary_commit_to_its_current_branch(
@@ -703,9 +741,11 @@ def checked_artifact(
     *,
     patch: str = PATCH,
     changed_path: str = "README.md",
+    changed_paths: list[str] | None = None,
     report_summary: object = "Updated the greeting.",
 ) -> Path:
     artifact = tmp_path / "result"
+    paths = changed_paths or [changed_path]
     patch_hash = hashlib.sha256(patch.encode()).hexdigest()
     publication = {
         "intent": "draft_pr",
@@ -724,7 +764,7 @@ def checked_artifact(
             "sha256": patch_hash,
             "byte_length": len(patch.encode()),
         },
-        "changed_files": {"count": 1, "paths": [changed_path]},
+        "changed_files": {"count": len(paths), "paths": paths},
         "verification": {
             "status": status,
             "configured_checks": ["check greeting"],
@@ -753,8 +793,8 @@ def checked_artifact(
             "usage": {
                 "iterations": 1,
                 "tool_calls": 2,
-                "changed_files": 1,
-                "diff_lines": 2,
+                "changed_files": len(paths),
+                "diff_lines": diff_line_count(patch),
                 "wall_time_minutes": 0,
             },
             "resource_limit_events": [],
