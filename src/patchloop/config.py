@@ -43,7 +43,7 @@ class RepositoryConfig:
     budgets: BudgetConfig
 
 
-DEFAULT_MODEL = "gemma-4-31b-it"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
 
 SAFETY_CEILINGS = {

@@ -1,5 +1,5 @@
 version: 1
-model: gemma-4-31b-it
+model: gemini-3.5-flash-lite
 verifier:
   image: alpine:3.22
   setup:

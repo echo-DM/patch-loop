@@ -96,7 +96,7 @@ budgets:
 | 字段 | 含义与允许范围 |
 | --- | --- |
 | `version` | 必须为 `1`。遇到未知版本时，会在 model 执行前失败。 |
-| `model` | Gemini Developer API 的 model identifier。建议显式配置；省略时仍默认为 `gemma-4-31b-it`。 |
+| `model` | Gemini Developer API 的 model identifier。建议显式配置；省略时默认为 `gemini-3.5-flash-lite`。 |
 | `verifier.image` | 每个 setup/check container 使用的指定 Docker image。 |
 | `verifier.setup` | 一个或多个预先声明的 setup 命令。 |
 | `verifier.checks` | 一个或多个预先声明的 verification 命令。 |

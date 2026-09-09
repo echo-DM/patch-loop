@@ -16,8 +16,8 @@ model: gemini-3.5-flash-lite
 
 The example model above completed real GitHub Actions/Gemini end-to-end runs in
 `patchloop-sorting-lab`. Configure a model explicitly because provider
-availability can change. If `model` is omitted, PatchLoop still uses the
-compatibility default `gemma-4-31b-it`. Model identifiers are validated before
+availability can change. If `model` is omitted, PatchLoop uses
+`gemini-3.5-flash-lite`. Model identifiers are validated before
 execution and the selected non-sensitive identifier is stored in the Run Report.
 
 The adapter reads only the dedicated environment variable below:

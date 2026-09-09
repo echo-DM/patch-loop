@@ -85,7 +85,7 @@ def test_gemini_tool_calls_drive_only_the_controlled_patch_flow(tmp_path: Path) 
     assert repository.joinpath("README.md").read_text() == "Hello from Gemini.\n"
     assert result.report["model"] == {
         "provider": "google_gemini_developer_api",
-        "name": "gemma-4-31b-it",
+        "name": "gemini-3.5-flash-lite",
     }
     assert [tool["function"]["name"] for tool in client.bound_tools] == [
         "list_files",
@@ -326,12 +326,12 @@ def test_dedicated_environment_secret_explicitly_selects_developer_api(
         return FakeGeminiClient([])
 
     adapter = GeminiPatchModelAdapter.from_environment(
-        "gemma-4-31b-it", client_factory=client_factory
+        "gemini-3.5-flash-lite", client_factory=client_factory
     )
 
-    assert adapter.model_name == "gemma-4-31b-it"
+    assert adapter.model_name == "gemini-3.5-flash-lite"
     assert captured == {
-        "model": "gemma-4-31b-it",
+        "model": "gemini-3.5-flash-lite",
         "api_key": dedicated_key,
         "vertexai": False,
         "retries": 0,
@@ -347,7 +347,7 @@ def test_ambient_google_credentials_do_not_replace_the_dedicated_secret(
     monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyAmbientGeminiKey123456789")
 
     with pytest.raises(ConfigError) as error:
-        GeminiPatchModelAdapter.from_environment("gemma-4-31b-it")
+        GeminiPatchModelAdapter.from_environment("gemini-3.5-flash-lite")
 
     assert error.value.code == "gemini_api_key_missing"
     assert "AIzaSyAmbient" not in error.value.message
@@ -370,7 +370,7 @@ def run_gemini(
     repository: Path,
     client: FakeGeminiClient,
     *,
-    model_name: str = "gemma-4-31b-it",
+    model_name: str = "gemini-3.5-flash-lite",
 ):
     return run(
         RunRequest(
@@ -398,7 +398,7 @@ def configured_repository(tmp_path: Path) -> Path:
     (repository / ".patchloop.yml").write_text(
         """\
 version: 1
-model: gemma-4-31b-it
+model: gemini-3.5-flash-lite
 verifier:
   image: fixture
   setup:

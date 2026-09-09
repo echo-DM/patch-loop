@@ -13,7 +13,7 @@ def test_no_change_task_returns_sanitized_report(cli_harness: CliHarness) -> Non
     assert json.loads(completed.stdout) == {
         "report_version": "1",
         "task_id": "issue-101",
-        "model": {"provider": "configured", "name": "gemma-4-31b-it"},
+        "model": {"provider": "configured", "name": "gemini-3.5-flash-lite"},
         "terminal_outcome": "no_change",
         "summary": "The task explicitly states that no repository change is required.",
         "actionable_message": "No files were changed and no pull request should be created.",

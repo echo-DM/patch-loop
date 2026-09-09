@@ -150,7 +150,7 @@ PatchLoop 会输出版本化 Run Report，记录模型标识、patch SHA-256、�
 ## 8. 模型适配器与真实调用边界
 
 `GeminiPatchModelAdapter` 使用 `ChatGoogleGenerativeAI` 和 Gemini Developer API，默认模型
-为 `gemma-4-31b-it`，并显式设置 `vertexai=False`。它只读取专用环境变量
+为 `gemini-3.5-flash-lite`，并显式设置 `vertexai=False`。它只读取专用环境变量
 `PATCHLOOP_GEMINI_API_KEY`，不会从 `.env`、通用 Google 环境变量或 Google Cloud 凭据中取值。
 
 默认测试使用模拟的模型响应，覆盖 harness 的行为，但不会调用 Gemini。真实调用要求显式

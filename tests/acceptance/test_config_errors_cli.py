@@ -30,14 +30,16 @@ def test_unknown_config_version_is_a_configuration_error(
 def test_missing_model_uses_the_default(cli_harness: CliHarness) -> None:
     repository = cli_harness.copy_repository()
     config = repository / ".patchloop.yml"
-    config.write_text(config.read_text().replace("model: gemma-4-31b-it\n", ""))
+    config.write_text(
+        config.read_text().replace("model: gemini-3.5-flash-lite\n", "")
+    )
 
     completed = cli_harness.run(repository)
 
     assert completed.returncode == 0
     assert json.loads(completed.stdout)["model"] == {
         "provider": "configured",
-        "name": "gemma-4-31b-it",
+        "name": "gemini-3.5-flash-lite",
     }
 
 
@@ -47,7 +49,9 @@ def test_model_identifier_is_validated_before_execution(
     repository = cli_harness.copy_repository()
     config = repository / ".patchloop.yml"
     config.write_text(
-        config.read_text().replace("model: gemma-4-31b-it", 'model: "bad model\\nname"')
+        config.read_text().replace(
+            "model: gemini-3.5-flash-lite", 'model: "bad model\\nname"'
+        )
     )
 
     completed = cli_harness.run(repository)
