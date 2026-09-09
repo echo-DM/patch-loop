@@ -11,12 +11,14 @@ The repository may choose a model in `.patchloop.yml`:
 
 ```yaml
 version: 1
-model: gemma-4-31b-it
+model: gemini-3.5-flash-lite
 ```
 
-If `model` is omitted, PatchLoop uses `gemma-4-31b-it`. Model identifiers are
-validated before execution and the selected non-sensitive identifier is stored
-in the Run Report.
+The example model above completed real GitHub Actions/Gemini end-to-end runs in
+`patchloop-sorting-lab`. Configure a model explicitly because provider
+availability can change. If `model` is omitted, PatchLoop still uses the
+compatibility default `gemma-4-31b-it`. Model identifiers are validated before
+execution and the selected non-sensitive identifier is stored in the Run Report.
 
 The adapter reads only the dedicated environment variable below:
 
@@ -41,8 +43,10 @@ Function calls are proposals; PatchLoop validates names, arguments, paths,
 budgets, and patch policy before executing them. API keys and complete provider
 message history are not written to LangGraph state, logs, artifacts, or reports.
 Provider calls use a 60-second request timeout and do not perform hidden SDK
-retries; timeouts, rate limits, and other provider failures receive stable error
-codes without persisting the provider exception text.
+retries. The PatchLoop harness may retry one recoverable provider failure within
+the existing tool and wall-time budgets, including a failure after edits, while
+preserving stable error codes and excluding provider exception text from
+persistent output.
 
 ## Tests
 

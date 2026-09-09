@@ -10,13 +10,32 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: patchloop-${{ github.repository }}-${{ github.event.issue.number }}
+  group: patchloop-caller-${{ github.repository }}-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
-  patchloop:
+  preflight:
     if: github.event.label.name == 'patchloop'
-    uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@v0.1.0
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.readiness.outputs.enabled }}
+    steps:
+      - name: Check credential presence
+        id: readiness
+        env:
+          PATCHLOOP_HAS_GEMINI_KEY: ${{ secrets.PATCHLOOP_GEMINI_API_KEY != '' }}
+        run: |
+          if [ "$PATCHLOOP_HAS_GEMINI_KEY" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  patchloop:
+    needs: preflight
+    if: needs.preflight.outputs.enabled == 'true'
+    uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@d9fd688fa9b65daf95eb8fea5bf912a368f6b1cd
     with:
       config_path: .patchloop.yml
     secrets:

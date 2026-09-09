@@ -12,6 +12,9 @@ PatchLoop v0 由一个可复用 GitHub workflow（reusable workflow）和 Python
 ## 要求
 
 - 目标仓库已启用 GitHub Actions。
+- 目标仓库允许 caller 使用 `echo-DM/patch-loop` reusable workflow，以及其中的
+  `actions/checkout`、`actions/upload-artifact`、`actions/download-artifact` 和
+  `astral-sh/setup-uv` actions。
 - 负责授权运行的维护者拥有 `write` 或 `admin` 权限。
 - Gemini Developer API key 已保存为目标仓库的 Secret
   `PATCHLOOP_GEMINI_API_KEY`。
@@ -36,13 +39,33 @@ PatchLoop v0 由一个可复用 GitHub workflow（reusable workflow）和 Python
 
 caller 授予 `contents: write`、`issues: write` 和 `pull-requests: write` 权限；
 reusable workflow 会按 job 缩减权限。它只传入指定的 Gemini Secret，绝不使用
-`secrets: inherit`。
+`secrets: inherit`。caller 中无权限的 `preflight` job 只判断该 Secret 是否存在，
+不会读取或输出其值；缺少 Secret 时，credentialed job 会安全跳过。
 
-发布版示例使用
-`echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@v0.1.0`。只有完成 live
-acceptance 后才会创建 release tag。在正式发布前，请将该 ref 替换为经过审查的
-commit SHA。若要最稳妥地固定供应链版本（supply-chain pin），请继续使用完整且不可变
-的 SHA；不要从 `main` 或其他会变动的 branch 安装。
+当前示例固定到在 `patchloop-sorting-lab` 中通过真实 GitHub Actions/Gemini 端到端验证的
+commit `d9fd688fa9b65daf95eb8fea5bf912a368f6b1cd`。若要最稳妥地固定供应链版本
+（supply-chain pin），请继续使用完整且不可变的 SHA；不要从 `main` 或其他会变动的
+branch 安装。`v0.1.0` 不包含其发布之后加入、并已包含在该 SHA 中的 provider recovery
+和多文件 patch 发布修复；后续 release tag 只有在独立 Live smoke 完成后才应替换示例
+中的 SHA。
+
+### GitHub Actions 设置
+
+目标仓库的默认 workflow permission 可以保持 `read`，因为 caller 已明确声明每个所需
+scope，reusable workflow 又会按 job 进一步缩减。PatchLoop 不需要启用
+“Allow GitHub Actions to create and approve pull requests”：它只创建 Draft PR，不会
+approve、标记 ready 或 merge。建议保持自动批准关闭，并由维护者人工审查和合并。
+
+如需用 `gh` 恢复建议设置，可将 `OWNER/REPO` 替换为目标仓库：
+
+```bash
+gh api --method PUT repos/OWNER/REPO/actions/permissions/workflow \
+  -f default_workflow_permissions=read \
+  -F can_approve_pull_request_reviews=false
+```
+
+这个仓库级默认值不会取代 caller 中显式的 `permissions`。如果组织策略禁止 workflow
+获得 write scope，则仓库管理员仍需先调整相应组织策略。
 
 ## 仓库配置
 
@@ -50,31 +73,30 @@ commit SHA。若要最稳妥地固定供应链版本（supply-chain pin），请
 
 ```yaml
 version: 1
-model: gemma-4-31b-it
+model: gemini-3.5-flash-lite
 verifier:
   image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
   setup:
-    - uv sync --frozen
+    - uv --version
   checks:
-    - uv run mypy
-    - uv run pytest
+    - UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/patchloop-venv uv run --frozen pytest -q
   limits:
-    timeout_seconds: 1800
-    memory_mb: 4096
-    pids: 512
-    output_bytes: 1000000
+    timeout_seconds: 300
+    memory_mb: 1024
+    pids: 256
+    output_bytes: 200000
 budgets:
   max_iterations: 3
   max_tool_calls: 60
-  max_changed_files: 20
-  max_diff_lines: 2000
-  max_wall_time_minutes: 30
+  max_changed_files: 2
+  max_diff_lines: 300
+  max_wall_time_minutes: 10
 ```
 
 | 字段 | 含义与允许范围 |
 | --- | --- |
 | `version` | 必须为 `1`。遇到未知版本时，会在 model 执行前失败。 |
-| `model` | Gemini Developer API 的 model identifier。省略时默认为 `gemma-4-31b-it`。 |
+| `model` | Gemini Developer API 的 model identifier。建议显式配置；省略时仍默认为 `gemma-4-31b-it`。 |
 | `verifier.image` | 每个 setup/check container 使用的指定 Docker image。 |
 | `verifier.setup` | 一个或多个预先声明的 setup 命令。 |
 | `verifier.checks` | 一个或多个预先声明的 verification 命令。 |
@@ -90,6 +112,16 @@ budgets:
 
 仓库可以调低 verifier limit 或预算（budget），但不能超过固定上限。运行前由维护者
 选择命令；Gemini 无法添加 shell 命令或扩大权限。
+
+上面的 Python/uv 配置已在 `patchloop-sorting-lab` 中完成真实 GitHub Actions/Gemini
+端到端验证。`uv` 的 cache 和 project environment 被放到 container 的 `/tmp`，避免依赖
+安装尝试写入挂载的目标仓库。`max_changed_files: 2` 和 `max_diff_lines: 300` 是该小型任务
+的限制，不是通用默认值；目标仓库应按预期 Issue 范围调整，但不能超过表中的固定上限。
+当前 schema 要求 `setup` 至少包含一条命令；无需安装步骤时可以使用只读的
+`uv --version` 一类环境检查。
+
+非 Python 项目应保留相同结构，但必须换成包含所需 runtime、package manager 和测试工具
+的 Docker image，并确认配置的 setup/check 命令都能在该 image 中执行。
 
 ## 为 Issue 添加 label 后会发生什么
 
@@ -113,6 +145,14 @@ budgets:
 每个仓库、每个 Issue 使用一个 concurrency group，防止运行重叠。workflow 不使用远程
 LangGraph checkpoint；如果任务被取消或 runner 丢失，后续运行会从 GitHub 中持久化的
 branch/PR 状态继续。
+
+### 修改配置后重试
+
+caller 只监听 `issues: labeled`。如果一次运行后修改了 `.patchloop.yml` 或 caller，应先
+提交修改，再移除并重新添加 `patchloop` label，产生新的 labeled event。GitHub 的
+“Re-run jobs” 会继续使用原运行关联的 commit，不能保证采用刚提交的新配置。重新授权前
+先阅读 Issue 中的 PatchLoop 反馈；`provider_error`、configuration、setup 和 publication
+failure 属于不同阶段，不应仅凭“没有 PR”判断原因。
 
 ## 结果与审查状态
 

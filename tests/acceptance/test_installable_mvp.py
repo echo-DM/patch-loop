@@ -44,8 +44,8 @@ def test_documented_local_example_runs_through_the_cli(
     assert report["terminal_outcome"] == "no_change"
     assert report["publication"] == {"intent": "none", "reason": "no_change"}
     assert report["verification"]["configured_checks"] == [
-        "uv run mypy",
-        "uv run pytest",
+        "UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/patchloop-venv "
+        "uv run --frozen pytest -q",
     ]
 
 

@@ -26,12 +26,14 @@ from patchloop.workflow import (
     run_prepare,
     verify_artifact,
 )
+from patchloop.config import load_repository_config
 from patchloop.github_publish import PullRequestState
 
 
 ROOT = Path(__file__).parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "patchloop-reusable.yml"
 CALLER = ROOT / "examples" / "patchloop-caller.yml"
+EXAMPLE_CONFIG = ROOT / "examples" / "patchloop.yml"
 
 
 class FixtureGitHubClient:
@@ -255,12 +257,12 @@ def test_prepare_stops_closed_pr_before_the_agent_and_reports_it(
     assert "explicit restart" in client.comments[0]
 
 
-def test_minimal_caller_filters_the_label_and_serializes_runs_per_issue() -> None:
+def test_minimal_caller_preflights_the_secret_and_serializes_runs_per_issue() -> None:
     caller = load_workflow(CALLER)
     trigger = cast(dict[str, object], cast(dict[str, object], caller["on"])["issues"])
     assert trigger == {"types": ["labeled"]}
     assert caller["concurrency"] == {
-        "group": "patchloop-${{ github.repository }}-${{ github.event.issue.number }}",
+        "group": "patchloop-caller-${{ github.repository }}-${{ github.event.issue.number }}",
         "cancel-in-progress": "false",
     }
     assert caller["permissions"] == {
@@ -270,15 +272,42 @@ def test_minimal_caller_filters_the_label_and_serializes_runs_per_issue() -> Non
     }
 
     jobs = cast(dict[str, object], caller["jobs"])
+    preflight = cast(dict[str, object], jobs["preflight"])
+    assert preflight["if"] == "github.event.label.name == 'patchloop'"
+    assert preflight["permissions"] == {}
+    preflight_text = json.dumps(preflight, sort_keys=True)
+    assert "PATCHLOOP_HAS_GEMINI_KEY" in preflight_text
+    assert "enabled=false" in preflight_text
+
     call = cast(dict[str, object], jobs["patchloop"])
-    assert call["if"] == "github.event.label.name == 'patchloop'"
+    assert call["needs"] == "preflight"
+    assert call["if"] == "needs.preflight.outputs.enabled == 'true'"
     assert call["uses"] == (
-        "echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@v0.1.0"
+        "echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@"
+        "d9fd688fa9b65daf95eb8fea5bf912a368f6b1cd"
     )
     assert call["with"] == {"config_path": ".patchloop.yml"}
     assert call["secrets"] == {
         "gemini_api_key": "${{ secrets.PATCHLOOP_GEMINI_API_KEY }}"
     }
+
+
+def test_python_uv_example_uses_the_end_to_end_validated_configuration() -> None:
+    config = load_repository_config(EXAMPLE_CONFIG)
+
+    assert config.model == "gemini-3.5-flash-lite"
+    assert config.verifier.setup == ("uv --version",)
+    assert config.verifier.checks == (
+        "UV_CACHE_DIR=/tmp/uv-cache UV_PROJECT_ENVIRONMENT=/tmp/patchloop-venv "
+        "uv run --frozen pytest -q",
+    )
+    assert config.verifier.limits.timeout_seconds == 300
+    assert config.verifier.limits.memory_mb == 1024
+    assert config.verifier.limits.pids == 256
+    assert config.verifier.limits.output_bytes == 200000
+    assert config.budgets.max_changed_files == 2
+    assert config.budgets.max_diff_lines == 300
+    assert config.budgets.max_wall_time_minutes == 10
 
 
 def test_gate_freezes_only_an_authorized_issue_for_the_agent(tmp_path: Path) -> None:
