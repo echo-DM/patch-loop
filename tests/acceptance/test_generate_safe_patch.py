@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from patchloop import RunAdapters, RunRequest, TaskSnapshot, load_repository_config, run
 from patchloop.adapters import (
     CheckResult,
@@ -12,6 +14,7 @@ from patchloop.adapters import (
     VerificationResult,
     EvaluationDecision,
 )
+from patchloop.controlled_tools import ControlledTools
 
 
 def test_controlled_tools_generate_an_integrity_checked_patch(
@@ -181,6 +184,144 @@ def test_invalid_tool_requests_are_controlled_and_model_can_recover(
     ]
     assert "ghp_model_secret123" not in result.patch.content
     assert secret not in str(result.report)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "expected_parts"),
+    [
+        (
+            "read_file",
+            {},
+            ('Required fields: ["path"]', 'Missing required fields: ["path"]'),
+        ),
+        (
+            "apply_patch",
+            {"path": "README.md", "patch": "private-diff-value"},
+            (
+                'Missing required fields: ["content"]',
+                'Unexpected fields: ["patch"]',
+            ),
+        ),
+        (
+            "search_code",
+            {"query": "Hello", "regex": True},
+            (
+                'Required fields: ["query"]',
+                'Optional fields: ["path"]',
+                'Unexpected fields: ["regex"]',
+            ),
+        ),
+        ("read_file", {"path": 7}, ("path must be a string",)),
+        ("search_code", {"query": ""}, ("query must not be empty",)),
+        (
+            "inspect_diff",
+            {"path": "README.md"},
+            (
+                "Required fields: []",
+                "Optional fields: []",
+                'Unexpected fields: ["path"]',
+            ),
+        ),
+    ],
+)
+def test_argument_errors_identify_corrections_and_allow_a_valid_retry(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, object],
+    expected_parts: tuple[str, ...],
+) -> None:
+    repository = configured_repository(tmp_path)
+    config = load_repository_config(repository / ".patchloop.yml")
+    tools = ControlledTools(
+        repository,
+        config.verifier,
+        config.budgets,
+        DeterministicVerifierAdapter(VerificationResult.passed(("check greeting",))),
+    )
+
+    rejected = tools.execute(ToolCall("invalid", tool_name, arguments))
+
+    assert not rejected.ok
+    assert rejected.output is None
+    assert rejected.error is not None
+    assert rejected.error["code"] == "invalid_arguments"
+    for part in expected_parts:
+        assert part in rejected.error["message"]
+    assert "private-diff-value" not in rejected.error["message"]
+    assert (repository / "README.md").read_text() == "Hello, world!\n"
+    corrected = tools.execute(
+        ToolCall("corrected", "read_file", {"path": "README.md"})
+    )
+    assert corrected.ok
+    assert corrected.output == "Hello, world!\n"
+
+
+def test_argument_errors_redact_field_names_and_do_not_echo_values(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    config = load_repository_config(repository / ".patchloop.yml")
+    tools = ControlledTools(
+        repository,
+        config.verifier,
+        config.budgets,
+        DeterministicVerifierAdapter(VerificationResult.passed(("check greeting",))),
+    )
+    field_secret = "ghp_argument_field_secret123"
+    value_secret = "ghp_argument_value_secret123"
+
+    result = tools.execute(
+        ToolCall(
+            "invalid",
+            "read_file",
+            {
+                "path": value_secret,
+                field_secret: "arbitrary-private-value",
+            },
+        )
+    )
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error["code"] == "invalid_arguments"
+    assert 'Required fields: ["path"]' in result.error["message"]
+    assert "Unexpected fields" in result.error["message"]
+    assert "[REDACTED]" in result.error["message"]
+    assert field_secret not in result.error["message"]
+    assert value_secret not in result.error["message"]
+    assert "arbitrary-private-value" not in result.error["message"]
+
+
+def test_long_argument_field_names_produce_bounded_actionable_errors(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    config = load_repository_config(repository / ".patchloop.yml")
+    tools = ControlledTools(
+        repository,
+        config.verifier,
+        config.budgets,
+        DeterministicVerifierAdapter(VerificationResult.passed(("check greeting",))),
+    )
+    field_secret = "ghp_argument_field_secret123"
+
+    result = tools.execute(
+        ToolCall(
+            "invalid",
+            "read_file",
+            {
+                "field_" + "x" * 5_000: "private-value",
+                field_secret: "another-private-value",
+            },
+        )
+    )
+
+    assert not result.ok
+    assert result.error is not None
+    message = result.error["message"]
+    assert result.error["code"] == "invalid_arguments"
+    assert len(message) <= 1_000
+    assert message.endswith("[message truncated]")
+    assert 'Missing required fields: ["path"]' in message
+    assert "Supply missing required fields and remove unexpected fields" in message
+    assert field_secret not in message
+    assert "private-value" not in message
 
 
 def test_passing_checks_terminalize_before_a_later_model_edit(tmp_path: Path) -> None:

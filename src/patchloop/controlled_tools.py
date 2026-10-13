@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import os
 import tempfile
 from dataclasses import dataclass
@@ -26,6 +27,11 @@ from patchloop.verifier_policy import is_sensitive_env_name
 
 
 MAX_PATCHED_FILE_BYTES = 1_000_000
+MAX_ARGUMENT_ERROR_CHARS = 1_000
+WORKSPACE_PATH_DESCRIPTION = (
+    "Repository-relative path using POSIX '/' separators, for example "
+    "'src/main.py'. Absolute paths and '..' components are rejected."
+)
 PROTECTED_PATHS = frozenset(
     {".git", ".github/workflows", ".patchloop", ".patchloop.yml"}
 )
@@ -80,40 +86,103 @@ class ControlledTools:
         registrations = (
             _ToolRegistration(
                 ToolDefinition(
-                    "list_files", "List workspace files below a path.", (), ("path",)
+                    "list_files",
+                    "Discover files before reading or editing. Recursively lists files "
+                    "under a directory; a file path returns only that file. Returns a "
+                    "sorted list of repository-relative file paths. "
+                    'Example arguments: {"path": "src"}.',
+                    (),
+                    ("path",),
+                    argument_descriptions={
+                        "path": WORKSPACE_PATH_DESCRIPTION
+                        + " Existing directory or file to inspect. Defaults to '.' "
+                        "(the repository root).",
+                    },
                 ),
                 self._list_files,
             ),
             _ToolRegistration(
                 ToolDefinition(
                     "search_code",
-                    "Search text files for an exact string.",
+                    "Locate relevant code with a case-sensitive literal substring, "
+                    "not a regular expression. Searches one UTF-8 file or recursively "
+                    "under a directory; prefer a narrow path. Returns matches with "
+                    "path, line (1-based), and text. "
+                    'Example arguments: {"query": "next_turn", "path": "src"}.',
                     ("query",),
                     ("path",),
+                    argument_descriptions={
+                        "query": "Non-empty, case-sensitive literal substring to find. "
+                        "Regex syntax is treated literally. Example: 'next_turn'.",
+                        "path": WORKSPACE_PATH_DESCRIPTION
+                        + " Existing directory or file to search. Defaults to '.' "
+                        "(the repository root).",
+                    },
                 ),
                 self._search_code,
             ),
             _ToolRegistration(
                 ToolDefinition(
-                    "read_file", "Read one UTF-8 workspace file.", ("path",)
+                    "read_file",
+                    "Read the complete UTF-8 content of one existing regular file, "
+                    "returned as text. Read an existing file before apply_patch to "
+                    "preserve content that should remain. "
+                    'Example arguments: {"path": "src/main.py"}.',
+                    ("path",),
+                    argument_descriptions={
+                        "path": WORKSPACE_PATH_DESCRIPTION
+                        + " Existing regular UTF-8 file to read.",
+                    },
                 ),
                 self._read_file,
             ),
             _ToolRegistration(
                 ToolDefinition(
                     "apply_patch",
-                    "Replace one UTF-8 workspace file.",
+                    "Create or replace one UTF-8 file with its complete final content, "
+                    "not a unified diff or a snippet. Read an existing file first and "
+                    "preserve all content that should remain. Missing parent "
+                    "directories are created; protected paths and change budgets are "
+                    "enforced. Returns path and applied. Then use inspect_diff and "
+                    "run_checks. "
+                    'Example arguments: {"path": "hello.py", '
+                    '"content": "print(\'hello\')\\n"}.',
                     ("path", "content"),
+                    argument_descriptions={
+                        "path": WORKSPACE_PATH_DESCRIPTION
+                        + " Destination file to create or replace.",
+                        "content": "Complete final UTF-8 file content, including "
+                        "unchanged content that should remain and intended newlines. "
+                        "The supplied string is written verbatim; unified diff hunks "
+                        "are not interpreted. Even a one-line edit requires the "
+                        "complete resulting file.",
+                    },
                 ),
                 self._apply_patch,
             ),
             _ToolRegistration(
-                ToolDefinition("inspect_diff", "Inspect the current unified diff.", ()),
+                ToolDefinition(
+                    "inspect_diff",
+                    "Review cumulative changes against the original file snapshots "
+                    "captured before this run's edits. Returns content (unified diff) "
+                    "and changed_files. Use after apply_patch and before run_checks. "
+                    "Accepts no arguments. Example arguments: {}.",
+                    (),
+                ),
                 self._inspect_diff,
             ),
             _ToolRegistration(
                 ToolDefinition(
-                    "run_checks", "Run configured checks through the verifier.", ()
+                    "run_checks",
+                    "Verify the current candidate patch by running repository-configured "
+                    "setup and check commands in a disposable Docker copy. Returns "
+                    "status, setup, and checks, including exit codes, failure categories, "
+                    "and bounded output. Ordinary check failures can guide repair "
+                    "within the budget; setup or infrastructure failure stops the run. "
+                    "Passing checks for a non-empty current patch finish the patch "
+                    "loop. Accepts no arguments; "
+                    "custom commands cannot be supplied. Example arguments: {}.",
+                    (),
                 ),
                 self._run_checks,
             ),
@@ -147,8 +216,7 @@ class ControlledTools:
         try:
             self._validate_arguments(
                 call.arguments,
-                registration.definition.required_arguments,
-                registration.definition.optional_arguments,
+                registration.definition,
             )
             output = registration.handler(call.arguments)
         except ToolInputError as error:
@@ -494,18 +562,38 @@ class ControlledTools:
     @staticmethod
     def _validate_arguments(
         arguments: Mapping[str, object],
-        required: tuple[str, ...],
-        optional: tuple[str, ...] = (),
+        definition: ToolDefinition,
     ) -> None:
+        required = definition.required_arguments
+        optional = definition.optional_arguments
+        guidance = (
+            f"Invalid arguments for {definition.name}. "
+            f"Required fields: {json.dumps(sorted(required))}. "
+            f"Optional fields: {json.dumps(sorted(optional))}. "
+            "Supply missing required fields and remove unexpected fields, "
+            "using the declared parameter types."
+        )
         if not all(isinstance(key, str) for key in arguments):
-            raise ToolInputError("invalid_arguments", "Tool argument names must be strings.")
+            raise ToolInputError(
+                "invalid_arguments",
+                guidance + " Arguments must be a JSON object with string field names.",
+            )
         keys = set(arguments)
         missing = set(required) - keys
         unexpected = keys - set(required) - set(optional)
         if missing or unexpected:
+            details: list[str] = []
+            if missing:
+                details.append(
+                    f"Missing required fields: {json.dumps(sorted(missing))}."
+                )
+            if unexpected:
+                details.append(
+                    f"Unexpected fields: {json.dumps(sorted(unexpected))}."
+                )
             raise ToolInputError(
                 "invalid_arguments",
-                "Tool arguments do not match the registered structured schema.",
+                guidance + " " + " ".join(details),
             )
 
     @staticmethod
@@ -523,11 +611,15 @@ class ControlledTools:
 
     @staticmethod
     def _error(call: ToolCall, code: str, message: str) -> ToolResult:
+        message = redact_text(message)
+        if code == "invalid_arguments" and len(message) > MAX_ARGUMENT_ERROR_CHARS:
+            marker = " [message truncated]"
+            message = message[: MAX_ARGUMENT_ERROR_CHARS - len(marker)] + marker
         return ToolResult(
             call.id,
             redact_text(call.name),
             False,
-            error={"code": code, "message": redact_text(message)},
+            error={"code": code, "message": message},
         )
 
 

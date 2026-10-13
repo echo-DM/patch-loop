@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Mapping, Protocol, Sequence, TypedDict, cast, runtime_checkable
@@ -73,6 +73,7 @@ class ToolDefinition:
     description: str
     required_arguments: tuple[str, ...]
     optional_arguments: tuple[str, ...] = ()
+    argument_descriptions: Mapping[str, str] = field(default_factory=dict, hash=False)
 
 
 @dataclass(frozen=True)

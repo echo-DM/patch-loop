@@ -199,10 +199,13 @@ class GeminiPatchModelAdapter:
 
 
 def _tool_declaration(tool: ToolDefinition) -> dict[str, object]:
-    properties = {
-        argument: {"type": "string"}
-        for argument in (*tool.required_arguments, *tool.optional_arguments)
-    }
+    properties: dict[str, object] = {}
+    for argument in (*tool.required_arguments, *tool.optional_arguments):
+        parameter: dict[str, object] = {"type": "string"}
+        description = tool.argument_descriptions.get(argument)
+        if description is not None:
+            parameter["description"] = description
+        properties[argument] = parameter
     return {
         "type": "function",
         "function": {

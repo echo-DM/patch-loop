@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from patchloop.adapters import (
     DeterministicVerifierAdapter,
+    EvaluationTask,
+    ToolDefinition,
     VerificationResult,
 )
 from patchloop.config import load_repository_config
@@ -96,6 +100,31 @@ def test_gemini_tool_calls_drive_only_the_controlled_patch_flow(tmp_path: Path) 
         "run_checks",
     ]
     assert all(tool["type"] == "function" for tool in client.bound_tools)
+    declarations = {
+        tool["function"]["name"]: tool["function"] for tool in client.bound_tools
+    }
+    for declaration in declarations.values():
+        assert "Example arguments:" in declaration["description"]
+        assert declaration["parameters"]["additionalProperties"] is False
+        for name, parameter in declaration["parameters"]["properties"].items():
+            assert parameter["type"] == "string"
+            assert parameter["description"]
+            if name == "path":
+                assert "Repository-relative" in parameter["description"]
+                assert "POSIX" in parameter["description"]
+    assert "case-sensitive literal substring" in declarations["search_code"]["description"]
+    assert "1-based" in declarations["search_code"]["description"]
+    for name in ("list_files", "search_code"):
+        path_description = declarations[name]["parameters"]["properties"]["path"]["description"]
+        assert "Defaults to '.'" in path_description
+    patch_parameters = declarations["apply_patch"]["parameters"]
+    assert patch_parameters["required"] == ["path", "content"]
+    assert "complete final" in declarations["apply_patch"]["description"]
+    assert "written verbatim" in patch_parameters["properties"]["content"]["description"]
+    assert "not interpreted" in patch_parameters["properties"]["content"]["description"]
+    for name in ("inspect_diff", "run_checks"):
+        assert declarations[name]["parameters"]["properties"] == {}
+        assert declarations[name]["parameters"]["required"] == []
     assert not any(
         forbidden in str(client.bound_tools).lower()
         for forbidden in (
@@ -110,6 +139,33 @@ def test_gemini_tool_calls_drive_only_the_controlled_patch_flow(tmp_path: Path) 
     assert "AIzaSyDedicatedPatchLoopKey123456789" not in str(client.requests)
 
 
+def test_legacy_tool_definition_can_still_be_bound_without_parameter_descriptions() -> None:
+    definition = ToolDefinition("read_file", "Read a UTF-8 file.", ("path",), ())
+    client = FakeGeminiClient([FakeResponse(content="Done.")])
+    adapter = GeminiPatchModelAdapter(
+        model_name="gemini-3.5-flash-lite",
+        api_key="fixture-key",
+        client=client,
+    )
+
+    adapter.next_turn(
+        EvaluationTask("legacy-tool", "Read a file", "Read README.md."),
+        (),
+        (definition,),
+    )
+
+    assert definition.argument_descriptions == {}
+    assert hash(definition) == hash(
+        ToolDefinition("read_file", "Read a UTF-8 file.", ("path",), ())
+    )
+    assert client.bound_tools[0]["function"]["parameters"] == {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+
+
 def test_invalid_and_unknown_gemini_calls_are_validated_by_patchloop(
     tmp_path: Path,
 ) -> None:
@@ -120,10 +176,16 @@ def test_invalid_and_unknown_gemini_calls_are_validated_by_patchloop(
                 tool_calls=[
                     {"id": "bad", "name": "read_file", "args": "README.md"},
                     {"id": "unknown", "name": "shell", "args": {"command": "id"}},
+                    {"id": "fields", "name": "read_file", "args": {"offset": 10}},
                 ]
             ),
             FakeResponse(
                 tool_calls=[
+                    {
+                        "id": "corrected-read",
+                        "name": "read_file",
+                        "args": {"path": "README.md"},
+                    },
                     {
                         "id": "edit",
                         "name": "apply_patch",
@@ -142,6 +204,17 @@ def test_invalid_and_unknown_gemini_calls_are_validated_by_patchloop(
     assert len(client.requests) == 2
     assert "invalid_arguments" in str(client.requests[1])
     assert "unknown_tool" in str(client.requests[1])
+    feedback: dict[str, Any] = {}
+    for message in client.requests[1]:
+        if isinstance(message, ToolMessage):
+            assert isinstance(message.content, str)
+            feedback[message.tool_call_id] = json.loads(message.content)
+    message = feedback["fields"]["error"]["message"]
+    assert feedback["fields"]["error"]["code"] == "invalid_arguments"
+    assert 'Missing required fields: ["path"]' in message
+    assert 'Unexpected fields: ["offset"]' in message
+    assert "Supply missing required fields and remove unexpected fields" in message
+    assert result.report["budgets"]["usage"]["tool_calls"] == 6
 
 
 @pytest.mark.parametrize(
