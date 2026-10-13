@@ -10,6 +10,8 @@ PatchLoop v0 由一个可复用 GitHub workflow（reusable workflow）和 Python
 自动合并工具，也不是用于运行恶意代码的强 sandbox。
 
 想快速理解运行流程与模块分工，请阅读[架构概览](docs/architecture.md)。
+想了解模型与 Harness 的分工，请阅读[AI 概念说明](docs/ai-concepts.md)。
+想了解数据类、类型契约与工具分发如何落地，请阅读[Python 语言特性](docs/python-features.md)。
 
 ## 要求
 
