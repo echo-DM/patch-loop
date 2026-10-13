@@ -9,6 +9,8 @@ PatchLoop v0 由一个可复用 GitHub workflow（reusable workflow）和 Python
 组成。它不是托管服务（hosted service）、GitHub App、可执行任意 shell 命令的 agent、
 自动合并工具，也不是用于运行恶意代码的强 sandbox。
 
+想快速理解运行流程与模块分工，请阅读[架构概览](docs/architecture.md)。
+
 ## 要求
 
 - 目标仓库已启用 GitHub Actions。
