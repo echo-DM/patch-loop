@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from math import isfinite
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, TypedDict, cast
@@ -11,6 +12,7 @@ from patchloop.config import RepositoryConfig, SAFETY_CEILINGS
 from patchloop.controlled_tools import MAX_PATCHED_FILE_BYTES
 from patchloop.errors import ConfigError, InfrastructureError, PatchLoopError, TaskError
 from patchloop.sanitize import redact_text
+from patchloop.provider_retries import MAX_RUN_RETRIES, RETRY_WAIT_SECONDS, RetryStopReason
 
 
 ARTIFACT_VERSION = "1"
@@ -323,7 +325,7 @@ def _append_summary(path: Path, report: Mapping[str, object]) -> None:
     budgets = _object_mapping(report.get("budgets"), "budget report")
     usage = _object_mapping(budgets.get("usage"), "budget usage")
     limits = _object_mapping(budgets.get("limits"), "budget limits")
-    rows = (
+    rows = [
         ("Terminal outcome", report.get("terminal_outcome")),
         ("Checks", verification.get("status")),
         ("Iterations", _ratio(usage, limits, "iterations", "max_iterations")),
@@ -334,11 +336,51 @@ def _append_summary(path: Path, report: Mapping[str, object]) -> None:
             "Wall time (minutes)",
             _ratio(usage, limits, "wall_time_minutes", "max_wall_time_minutes"),
         ),
-    )
+    ]
+    if "provider_retry" in report:
+        rows.extend(_provider_retry_rows(report["provider_retry"], report.get("terminal_outcome")))
     with path.open("a") as stream:
         stream.write("## PatchLoop\n\n| Field | Result |\n| --- | --- |\n")
         for label, value in rows:
             stream.write(f"| {label} | {_summary_scalar(value)} |\n")
+        if "provider_retry" in report:
+            stream.write("\nRequest recovery does not establish task success; see Terminal outcome and Checks.\n")
+
+
+def _provider_retry_rows(raw: object, outcome: object) -> list[tuple[str, object]]:
+    retry = _object_mapping(raw, "provider retry summary")
+    attempts = _retry_count(retry.get("attempts"), MAX_RUN_RETRIES)
+    recovered = _retry_count(retry.get("recovered_requests"), attempts)
+    waiting = retry.get("waiting_seconds")
+    # Allow measured scheduling overruns beyond 60 seconds, with a finite
+    # one-day display ceiling. This is not an increased retry allowance.
+    if (
+        isinstance(waiting, bool) or not isinstance(waiting, (int, float))
+        or not 0 <= waiting <= 86_400 or not isfinite(waiting)
+    ):
+        raise ArtifactIntegrityError("Run report contains invalid provider retry waiting time.")
+    rows: list[tuple[str, object]] = [
+        ("Provider retry attempts", f"{attempts} / {MAX_RUN_RETRIES}"),
+        ("Retry waiting time (seconds)", f"{waiting:.3f} / {RETRY_WAIT_SECONDS:g}"),
+        ("Recovered provider requests", recovered),
+    ]
+    if "stop_reason" in retry:
+        reason = retry["stop_reason"]
+        if not isinstance(reason, str) or len(reason) > 64:
+            raise ArtifactIntegrityError("Run report contains an invalid provider retry stop reason.")
+        try:
+            stop = RetryStopReason(reason)
+        except ValueError:
+            raise ArtifactIntegrityError("Run report contains an unknown provider retry stop reason.") from None
+        if outcome == "failed":
+            rows.append(("Provider recovery stopped", stop.value))
+    return rows
+
+
+def _retry_count(value: object, maximum: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= maximum:
+        raise ArtifactIntegrityError("Run report contains an invalid provider retry count.")
+    return value
 
 
 def _ratio(

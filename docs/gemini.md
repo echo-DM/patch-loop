@@ -42,13 +42,46 @@ Gemini receives only the six structured PatchLoop declarations: `list_files`,
 Function calls are proposals; PatchLoop validates names, arguments, paths,
 budgets, and patch policy before executing them. API keys and complete provider
 message history are not written to LangGraph state, logs, artifacts, or reports.
-Provider calls use a 60-second request timeout and do not perform hidden SDK
-retries. The PatchLoop harness currently allows one immediate additional request
-across the entire run for a recognized transient provider failure, within the
-existing tool and wall-time budgets. It retries the pending turn, including after
-edits, without replaying completed tools or duplicating pending observations.
-Multiple retries, backoff, and a timeout based on remaining run time are later
-tickets in the [provider retry specification](../.scratch/provider-retry-policy/spec.md).
+Provider calls use a timeout of the lesser of 60 seconds and the remaining total
+run time, passed through `PatchModel.next_turn(..., timeout_seconds=...)` to the
+SDK's call-time `timeout`. SDK automatic retries remain disabled. The harness
+checks the clock after return; a transport timeout cannot guarantee cancellation
+of all local processing or an exact wall-clock deadline.
+If less than one millisecond remains, no new request is issued: the SDK uses
+integer milliseconds and a zero value would disable its transport timeout.
+
+The core retries a recognized transient failure at most three additional times
+per pending request and six times per run. Initial requests do not count as
+retries. Success resets only the per-request count. Retries preserve the pending
+turn's inputs without replaying completed tools, duplicating observations, or
+consuming useful model turns, tool calls, or verification iterations.
+
+Without a provider minimum delay, retry waits are 5, 10, and 20 seconds plus
+uniform jitter from 0 to 1 second. All deliberate waiting shares a 60-second
+allowance per run; request execution consumes only the separate total runtime
+budget. Only jitter may be trimmed to fit the waiting allowance. If the base
+delay cannot fit, or no runtime would remain for the request, recovery stops.
+The core measures actual waits using a monotonic clock and checks before and
+after waiting. A scheduling overrun is reported and prevents further retries;
+the 60-second allowance is not an operating-system real-time guarantee.
+
+The adapter recognizes `type.googleapis.com/google.rpc.RetryInfo` with a
+nonnegative protobuf JSON `retryDelay` string (for example, `7.5s`), and
+`Retry-After` from exception/response headers. It accepts nonnegative numeric
+seconds or an HTTP date, including obsolete HTTP date forms; an elapsed date
+means a zero minimum. The longest valid hint across the bounded exception chain
+takes precedence over fallback backoff. Missing, malformed, or nonfinite hints
+use fallback. Detail entries are bounded as below; hint strings are limited to
+128 characters. Standard header spellings are checked directly, with at most
+32 additional header entries inspected for mixed-case names. No raw hint data
+is persisted. See [HTTP date and Retry-After semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3).
+
+If a provider minimum cannot fit the waiting or remaining runtime budget,
+recovery stops rather than retrying earlier. These defaults are fixed; no
+`.patchloop.yml` retry settings or proactive throttling are added. Recovery stays
+within one run. Deterministic tests do not establish live Gemini free-tier
+recovery rates. The confirmed design is in the
+[provider retry specification](../.scratch/provider-retry-policy/spec.md).
 
 ## Provider failures
 
@@ -84,11 +117,49 @@ details do not confirm daily exhaustion. A 429, `RESOURCE_EXHAUSTED`, or a messa
 about a daily limit alone is insufficient. The daily-exhaustion message directs
 the user to check the project's quota in AI Studio and rerun after it resets.
 
-Failures that cannot be retried stop immediately. If the additional request
-also fails, the report records the last normalized failure. Provider failures
+Failures that cannot be retried stop immediately. If recovery stops, the report
+records the last normalized failure. Provider failures
 retain category `model` and end with `failed`, no publication intent, and no
 returned patch, even after local edits. They do not enter the budget-exhaustion
 branch that can preserve a partial patch for publication.
+
+## Retry report and Actions summary
+
+Controlled Agent reports add an optional `provider_retry` object to report
+version `1`. Evaluator-only and older reports may omit it:
+
+```json
+{"attempts": 2, "waiting_seconds": 15.5, "recovered_requests": 1}
+```
+
+`attempts` counts actual additional requests; `waiting_seconds` records actual
+deliberate waiting, including jitter and scheduling overruns;
+`recovered_requests` counts pending requests that obtained a response after a
+failure. Recovery adds no unresolved error and does not determine the task's
+terminal outcome. The Actions summary shows these values separately from
+Terminal outcome and Checks. PR bodies and Issue feedback retain their existing
+scope, and patch/artifact integrity fields retain their existing rules.
+
+On provider recovery termination, `stop_reason` is one of:
+
+| Stable reason | Meaning |
+| --- | --- |
+| `non_retryable` | Permanent, daily-quota, or unknown provider failure |
+| `request_retry_limit` | Three additional requests used for this pending turn |
+| `run_retry_limit` | Six additional requests used across the run |
+| `retry_wait_limit` | Fallback wait cannot fit, or measured wait exceeded 60 seconds |
+| `run_deadline` | Remaining runtime cannot support recovery, or a request/wait returned after the deadline |
+| `provider_delay_wait_limit` | Provider minimum exceeds the remaining waiting allowance |
+| `provider_delay_run_deadline` | Provider minimum leaves no runtime for another request |
+
+Actions validates counts as integers (excluding booleans), with attempts in
+0–6 and recovered requests in 0–attempts. Waiting must be finite and nonnegative,
+bounded to 86,400 seconds for display validation so extreme scheduling overruns
+cannot introduce unbounded values. This display bound does not increase the
+60-second scheduling allowance. Only recognized stop reasons are rendered for
+failed runs. Invalid retry metadata is rejected before appending a summary;
+arbitrary provider fields are ignored. Reports without the optional object keep
+the existing Actions rows.
 
 ## Tool semantics and argument recovery
 

@@ -4,6 +4,7 @@ import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol, cast
+from time import time
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -17,7 +18,7 @@ from patchloop.adapters import (
     ToolResult,
 )
 from patchloop.errors import ConfigError
-from patchloop.provider_errors import normalize_provider_failure
+from patchloop.provider_errors import ProviderFailure, normalize_provider_delay, normalize_provider_failure
 from patchloop.sanitize import redact_text
 
 
@@ -28,7 +29,7 @@ MODEL_REQUEST_TIMEOUT_SECONDS = 60.0
 
 
 class GeminiInvoker(Protocol):
-    def invoke(self, messages: list[BaseMessage]) -> object: ...
+    def invoke(self, messages: list[BaseMessage], *, timeout: float) -> object: ...
 
 
 class GeminiClient(Protocol):
@@ -47,6 +48,7 @@ class GeminiPatchModelAdapter:
         api_key: str,
         client: GeminiClient | None = None,
         client_factory: Callable[..., object] = ChatGoogleGenerativeAI,
+        wall_clock: Callable[[], float] = time,
     ) -> None:
         if not api_key.strip():
             raise ConfigError(
@@ -54,6 +56,7 @@ class GeminiPatchModelAdapter:
                 f"{PATCHLOOP_GEMINI_API_KEY} must contain a Gemini API key.",
             )
         self.model_name = model_name
+        self._wall_clock = wall_clock
         self._client = client if client is not None else cast(
             GeminiClient, _create_client(client_factory, model_name, api_key)
         )
@@ -86,16 +89,22 @@ class GeminiPatchModelAdapter:
         task: EvaluationTask,
         observations: tuple[ToolResult, ...],
         available_tools: tuple[ToolDefinition, ...],
+        *,
+        timeout_seconds: float = MODEL_REQUEST_TIMEOUT_SECONDS,
     ) -> ModelTurn:
         self._bind_tools(available_tools)
         message_count = len(self._messages)
         self._append_input(task, observations)
         assert self._bound_client is not None
         try:
-            response = self._bound_client.invoke(list(self._messages))
+            response = self._bound_client.invoke(list(self._messages), timeout=timeout_seconds)
         except Exception as error:
             del self._messages[message_count:]
-            return ModelTurn.decide(self._provider_failure(error))
+            failure = normalize_provider_failure(error)
+            return ModelTurn(
+                decision=self._provider_failure(failure),
+                provider_retry_delay=normalize_provider_delay(error, self._wall_clock()) if failure.retryable else None,
+            )
         turn, history_message = self._translate_response(response)
         self._messages.append(history_message)
         return turn
@@ -178,8 +187,7 @@ class GeminiPatchModelAdapter:
         return value
 
     @staticmethod
-    def _provider_failure(error: BaseException) -> EvaluationDecision:
-        failure = normalize_provider_failure(error)
+    def _provider_failure(failure: ProviderFailure) -> EvaluationDecision:
         return EvaluationDecision(
             terminal_outcome="failed",
             summary="Gemini could not continue the controlled patch task.",

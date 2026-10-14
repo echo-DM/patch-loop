@@ -1,11 +1,13 @@
 # Bounded provider retries for Gemini free-tier use
 
 Status: Design confirmed on 2026-10-14. Ticket 01 was implemented and validated
-on 2026-10-14 after separate authorization. Tickets 02-04 remain unimplemented.
+on 2026-10-14 after separate authorization. Tickets 02-04 were implemented
+together on the current branch, validated, and reviewed on 2026-10-14 after
+separate authorization.
 
 This specification records the retry-policy design confirmed on 2026-10-14.
-The policies below are implementation requirements, not claims about current
-runtime behavior.
+The policies below are implementation requirements. Current behavior and
+offline evidence are described below; they do not establish live recovery rates.
 Domain terms are defined in [CONTEXT.md](../../CONTEXT.md).
 
 ## Confirmed constraints
@@ -42,20 +44,30 @@ waiting and run-time budgets.
 
 ## Current implementation evidence
 
-- [core.py](../../src/patchloop/core.py) provides one additional provider retry
-  across the entire run, immediately, without resetting eligibility after a
-  successful response. Ticket 01 changes its final report to the last failure
-  and stops immediately for non-retryable provider failures.
+- [core.py](../../src/patchloop/core.py) owns pending-turn recovery, useful model
+  turns, remaining request timeout, and final failure/publication decisions.
+  [provider_retries.py](../../src/patchloop/provider_retries.py) accounts shared
+  attempts and actual waiting, with per-request resets and bounded backoff.
 - [gemini.py](../../src/patchloop/gemini.py) normalizes SDK exceptions through
   [provider_errors.py](../../src/patchloop/provider_errors.py), distinguishing
   recognized transient failures, permanent failures, structured daily quota
-  exhaustion, and unknown exceptions. Current behavior is documented in
+  exhaustion, and unknown exceptions, and extracts bounded retry-delay hints.
+  Current behavior is documented in
   [docs/gemini.md](../../docs/gemini.md).
 - The adapter rolls back the failed turn's appended inputs before another
   attempt; completed controlled tool actions are not repeated.
 - [Gemini acceptance tests](../../tests/acceptance/test_gemini_patch_flow.py)
-  cover initial recovery, recovery after edits, and repeated provider failure.
+  cover initial/after-edit recovery, shared limits, provider hints, actual wait
+  overruns, shrinking request timeout, and publication suppression on failure.
   These are deterministic tests, not evidence of free-tier service recovery.
+- [Actions summary tests](../../tests/acceptance/test_provider_retry_summary.py)
+  cover optional report compatibility, recovery versus task success, stable stop
+  reasons, and rejection of malformed or unbounded retry metadata.
+
+Validation on 2026-10-14: the full offline suite passed with 277 tests and
+12 Docker integration skips; strict typing passed for 21 source files. Standards
+and Spec review findings were resolved and re-reviewed. Live Gemini/GitHub
+smoke and Docker-backed release validation were not performed.
 
 ## Confirmed failure classification
 
@@ -118,7 +130,7 @@ classification, jitter range, and rule for simultaneous provider retry hints.
 - Leave PR-body and Issue-feedback expansion outside this reporting change;
   existing final failure feedback continues to use stable normalized errors.
 
-### Acceptance evidence required for a future implementation
+### Acceptance evidence required
 
 Use fake provider responses, clocks, waiting, and randomness rather than live
 credentials or real sleeps. Cover:
@@ -146,7 +158,7 @@ Deterministic acceptance cannot establish live free-tier recovery rates.
 
 ## Existing behavior to preserve
 
-Provider failures currently end with `failed`, no publication intent, and no
+Provider failures end with `failed`, no publication intent, and no
 returned patch, even after local edits. Preserve that behavior for retry-limit
 or retry-wait exhaustion. In [core.py](../../src/patchloop/core.py), failures
 classified as `budget` can retain an existing patch for a Draft PR; new provider

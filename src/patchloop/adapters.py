@@ -20,6 +20,7 @@ CheckFailureCategory = Literal[
     "infrastructure",
 ]
 WRITE_PERMISSIONS: frozenset[RepositoryPermission] = frozenset({"admin", "write"})
+MIN_MODEL_REQUEST_SECONDS = 0.001
 
 
 class ReportEvent(TypedDict):
@@ -103,6 +104,7 @@ class ModelTurn:
     tool_calls: tuple[ToolCall, ...] = ()
     completion: PatchCompletion | None = None
     decision: EvaluationDecision | None = None
+    provider_retry_delay: float | None = None
 
     @classmethod
     def complete(cls, summary: str, actionable_message: str) -> ModelTurn:
@@ -119,6 +121,8 @@ class PatchModel(Protocol):
         task: EvaluationTask,
         observations: tuple[ToolResult, ...],
         available_tools: tuple[ToolDefinition, ...],
+        *,
+        timeout_seconds: float = 60.0,
     ) -> ModelTurn: ...
 
 
@@ -254,6 +258,8 @@ class DeterministicPatchModelAdapter:
         task: EvaluationTask,
         observations: tuple[ToolResult, ...],
         available_tools: tuple[ToolDefinition, ...],
+        *,
+        timeout_seconds: float = 60.0,
     ) -> ModelTurn:
         _ = task
         self.available_tools = available_tools

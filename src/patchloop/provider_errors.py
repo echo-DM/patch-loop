@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import timezone
 from enum import Enum
+from email.utils import parsedate_to_datetime
+from itertools import islice
+from math import isfinite
+import re
 
 import httpx
 from langchain_core.exceptions import (
@@ -99,15 +104,7 @@ _DAILY_QUOTA_METRICS = frozenset({
 
 
 def _has_daily_quota_violation(error: BaseException) -> bool:
-    details = getattr(error, "details", None)
-    # google-genai keeps the complete JSON body in .details; wrappers may expose
-    # the error object or its detail list instead. Do not parse exception text.
-    if isinstance(details, Mapping):
-        body = details.get("error", details)
-        details = body.get("details") if isinstance(body, Mapping) else None
-    if not isinstance(details, (list, tuple)):
-        return False
-    for detail in details[:32]:
+    for detail in _structured_details(error):
         if not isinstance(detail, Mapping) or detail.get("@type") != "type.googleapis.com/google.rpc.QuotaFailure":
             continue
         violations = detail.get("violations")
@@ -121,6 +118,76 @@ def _has_daily_quota_violation(error: BaseException) -> bool:
             if _recognized_identifier(quota_id, _DAILY_QUOTA_IDS) or _recognized_identifier(metric, _DAILY_QUOTA_METRICS):
                 return True
     return False
+
+
+def _structured_details(error: BaseException) -> list[object] | tuple[object, ...]:
+    details = getattr(error, "details", None)
+    # google-genai keeps the complete JSON body in .details; wrappers may expose
+    # the error object or its detail list instead. Do not parse exception text.
+    if isinstance(details, Mapping):
+        body = details.get("error", details)
+        details = body.get("details") if isinstance(body, Mapping) else None
+    if not isinstance(details, (list, tuple)):
+        return ()
+    return details[:32]
+
+
+def normalize_provider_delay(error: BaseException, now: float) -> float | None:
+    """Extract only a finite minimum delay; discard all provider source data."""
+    delays: list[float] = []
+    for item in _exception_chain(error):
+        for detail in _structured_details(item):
+            if isinstance(detail, Mapping) and detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
+                raw = detail.get("retryDelay")
+                if isinstance(raw, str) and len(raw) <= 128 and re.fullmatch(r"[0-9]+(?:\.[0-9]{1,9})?s", raw):
+                    delay = float(raw[:-1])
+                    if isfinite(delay):
+                        delays.append(delay)
+        response = getattr(item, "response", None)
+        for headers in (getattr(item, "headers", None), getattr(response, "headers", None)):
+            if not isinstance(headers, Mapping):
+                continue
+            # Direct lookups avoid scanning an unbounded header collection.
+            for name in ("retry-after", "Retry-After", "RETRY-AFTER"):
+                header_delay = _retry_after(headers.get(name), now)
+                if header_delay is not None:
+                    delays.append(header_delay)
+            for name, value in islice(headers.items(), 32):
+                if isinstance(name, str) and len(name) <= 128 and name.lower() == "retry-after":
+                    header_delay = _retry_after(value, now)
+                    if header_delay is not None:
+                        delays.append(header_delay)
+    return max(delays) if delays else None
+
+
+_DAY_NAME = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+_MONTH_NAME = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_TIME_OF_DAY = r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
+_HTTP_DATE = re.compile(
+    rf"(?:{_DAY_NAME}, [0-9]{{2}} {_MONTH_NAME} [0-9]{{4}} {_TIME_OF_DAY} GMT"
+    rf"|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [0-9]{{2}}-{_MONTH_NAME}-[0-9]{{2}} {_TIME_OF_DAY} GMT"
+    rf"|{_DAY_NAME} {_MONTH_NAME} (?:[0-9]{{2}}| [0-9]) {_TIME_OF_DAY} [0-9]{{4}})"
+)
+
+
+def _retry_after(raw: object, now: float) -> float | None:
+    if not isinstance(raw, str) or len(raw) > 128:
+        return None
+    value = raw.strip()
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+        seconds = float(value)
+        return seconds if isfinite(seconds) else None
+    if _HTTP_DATE.fullmatch(value) is None:
+        return None
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            # HTTP's obsolete asctime form has an implicit GMT timezone.
+            date = date.replace(tzinfo=timezone.utc)
+        seconds = max(0.0, date.timestamp() - now)
+        return seconds if isfinite(seconds) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _recognized_identifier(value: object, identifiers: frozenset[str]) -> bool:

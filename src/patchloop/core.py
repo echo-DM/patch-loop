@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
+from random import random
 from typing import Callable, Literal, Mapping, NotRequired, TypedDict, cast
 
 from patchloop.adapters import (
@@ -13,6 +14,7 @@ from patchloop.adapters import (
     GitHubTaskResolver,
     IssueComment,
     ModelMetadata,
+    MIN_MODEL_REQUEST_SECONDS,
     PatchModel,
     PatchCompletion,
     ReportEvent,
@@ -34,6 +36,7 @@ from patchloop.controlled_tools import (
 from patchloop.errors import ConfigError, InfrastructureError
 from patchloop.graph import evaluate_task
 from patchloop.provider_errors import ProviderFailure
+from patchloop.provider_retries import ProviderRetries, ProviderRetryReport, RetryStopReason
 from patchloop.sanitize import redact_text
 
 
@@ -145,6 +148,7 @@ class RunReport(TypedDict):
     errors: list[ReportEvent]
     clarification_questions: NotRequired[list[str]]
     integrity: NotRequired[IntegrityReport]
+    provider_retry: NotRequired[ProviderRetryReport]
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,8 @@ class RunAdapters:
     model: PatchModel | None = None
     verifier: VerifierAdapter | None = None
     clock: Callable[[], float] = monotonic
+    sleep: Callable[[float], None] = sleep
+    jitter: Callable[[], float] = random
 
 
 @dataclass(frozen=True)
@@ -252,6 +258,8 @@ def run(request: RunRequest) -> RunResult:
                 request.adapters.verifier,
                 request.adapters.clock,
                 started_at,
+                request.adapters.sleep,
+                request.adapters.jitter,
             )
         if request.adapters.evaluator is None:
             raise InfrastructureError(
@@ -390,6 +398,8 @@ def _run_patch(
     verifier: VerifierAdapter,
     clock: Callable[[], float],
     started_at: float,
+    wait: Callable[[float], None],
+    jitter: Callable[[], float],
 ) -> RunResult:
     tools = ControlledTools(repository, config.verifier, config.budgets, verifier)
     elapsed_seconds = 0.0
@@ -405,11 +415,33 @@ def _run_patch(
     tool_calls = 0
     completion = None
     error: ReportEvent | None = None
-    provider_retry_used = False
-    for _ in range(config.budgets.max_tool_calls + 1):
+    retries = ProviderRetries(clock, wait, jitter, started_at + config.budgets.max_wall_time_minutes * 60)
+    request_retries = 0
+    pending_failure: ReportEvent | None = None
+    useful_turns = 0
+    while useful_turns < config.budgets.max_tool_calls + 1:
         if (error := check_wall_time()) is not None:
+            if pending_failure is not None:
+                error = pending_failure
+                retries.stop_reason = RetryStopReason.RUN_DEADLINE
             break
-        turn = model.next_turn(task, observations, tools.definitions)
+        timeout_seconds = min(60.0, retries.deadline - started_at - elapsed_seconds)
+        # The SDK truncates seconds to integer milliseconds; zero disables its
+        # transport timeout. Never round up beyond the remaining run budget.
+        if timeout_seconds < MIN_MODEL_REQUEST_SECONDS:
+            if pending_failure is not None:
+                error = pending_failure
+                retries.stop_reason = RetryStopReason.RUN_DEADLINE
+            else:
+                error = _wall_time_limit_error()
+            break
+        if pending_failure is not None:
+            retries.attempts += 1
+            request_retries += 1
+        turn = model.next_turn(
+            task, observations, tools.definitions,
+            timeout_seconds=timeout_seconds,
+        )
         if (error := check_wall_time()) is not None:
             # A returned provider failure must not become budget exhaustion,
             # which can authorize publication of an existing partial patch.
@@ -417,6 +449,7 @@ def _run_patch(
                 provider_failure = _provider_failure_event(turn.decision)
                 if provider_failure is not None:
                     error = provider_failure
+                    retries.stop_reason = RetryStopReason.RUN_DEADLINE
             break
         selected_actions = sum(
             (
@@ -437,12 +470,19 @@ def _run_patch(
             if provider_failure is not None:
                 if not ProviderFailure(provider_failure["code"]).retryable:
                     error = provider_failure
+                    retries.stop_reason = RetryStopReason.NON_RETRYABLE
                     break
-                if not provider_retry_used:
-                    provider_retry_used = True
+                pending_failure = provider_failure
+                if retries.wait(request_retries, turn.provider_retry_delay):
                     continue
                 error = provider_failure
                 break
+        if pending_failure is not None:
+            retries.recovered_requests += 1
+            pending_failure = None
+        request_retries = 0
+        useful_turns += 1
+        if turn.decision is not None:
             if tools.patch_bundle() is not None:
                 error = {
                     "category": "model",
@@ -450,13 +490,15 @@ def _run_patch(
                     "message": "A no-patch decision cannot follow repository edits.",
                 }
                 break
-            return _result_from_decision(
+            result = _result_from_decision(
                 task.id,
                 turn.decision,
                 config,
                 wall_time_minutes=int(elapsed_seconds // 60),
                 model=model,
             )
+            result.report["provider_retry"] = retries.report()
+            return result
         if turn.completion is not None:
             completion = turn.completion
             break
@@ -633,6 +675,7 @@ def _run_patch(
             "algorithm": "sha256",
             "patch_sha256": patch.sha256,
         }
+    report["provider_retry"] = retries.report()
     return RunResult(
         terminal_outcome=terminal_outcome,
         patch=patch,

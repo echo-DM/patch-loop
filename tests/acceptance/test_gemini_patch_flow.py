@@ -4,7 +4,6 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic
 from typing import Any
 
 import pytest
@@ -37,13 +36,15 @@ class FakeGeminiClient:
         self._responses = iter(responses)
         self.bound_tools: list[dict[str, object]] = []
         self.requests: list[list[object]] = []
+        self.timeouts: list[float] = []
 
     def bind_tools(self, tools: list[dict[str, object]]) -> FakeGeminiClient:
         self.bound_tools = tools
         return self
 
-    def invoke(self, messages: list[object]) -> FakeResponse:
+    def invoke(self, messages: list[object], *, timeout: float = 60.0) -> FakeResponse:
         self.requests.append(messages)
+        self.timeouts.append(timeout)
         response = next(self._responses)
         if isinstance(response, BaseException):
             raise response
@@ -52,6 +53,330 @@ class FakeGeminiClient:
 
 class RateLimitError(Exception):
     status_code = 429
+
+
+class RetryClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.waits: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.waits.append(seconds)
+        self.now += seconds
+
+
+def test_three_retries_recover_without_consuming_useful_model_turns(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    config_path = repository / ".patchloop.yml"
+    config_path.write_text(config_path.read_text().replace("max_tool_calls: 60", "max_tool_calls: 2"))
+    client = FakeGeminiClient([
+        TimeoutError(), RateLimitError(), ConnectionError(),
+        FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {
+            "path": "README.md", "content": "Recovered.\n",
+        }}]),
+        FakeResponse(tool_calls=[{"id": "checks", "name": "run_checks", "args": {}}]),
+    ])
+    clock = RetryClock()
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep, jitter=lambda: 0.5)
+
+    assert result.terminal_outcome == "pr_created"
+    assert result.report["errors"] == []
+    assert clock.waits == [5.5, 10.5, 20.5]
+    assert result.report["provider_retry"] == {
+        "attempts": 3, "waiting_seconds": 36.5, "recovered_requests": 1,
+    }
+    assert result.report["budgets"]["usage"]["tool_calls"] == 2
+    assert result.report["budgets"]["usage"]["iterations"] == 1
+    assert client.requests[0] == client.requests[1] == client.requests[2] == client.requests[3]
+
+
+def test_retry_exhaustion_after_edit_reports_last_failure_without_publication(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+    client = FakeGeminiClient([
+        FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {
+            "path": "README.md", "content": "Local edit.\n",
+        }}]),
+        TimeoutError(), ConnectionError(), TimeoutError(), RateLimitError(),
+    ])
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep)
+
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.publication["intent"] == "none"
+    assert result.report["errors"][0]["code"] == "provider_rate_limited"
+    assert result.report["provider_retry"] == {
+        "attempts": 3, "waiting_seconds": 35.0, "recovered_requests": 0,
+        "stop_reason": "request_retry_limit",
+    }
+    assert clock.waits == [5, 10, 20]
+    assert len(client.requests) == 5
+    assert client.requests[1] == client.requests[2] == client.requests[3] == client.requests[4]
+    assert len([m for m in client.requests[4] if isinstance(m, ToolMessage)]) == 1
+    assert result.report["budgets"]["resource_limit_events"] == []
+
+
+def test_success_resets_request_retries_but_run_limit_stays_shared(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    responses: list[FakeResponse | BaseException] = []
+    for index in range(6):
+        responses.extend([TimeoutError(), FakeResponse(tool_calls=[{
+            "id": f"read-{index}", "name": "read_file", "args": {"path": "README.md"},
+        }])])
+    responses.append(RateLimitError())
+    clock = RetryClock()
+    client = FakeGeminiClient(responses)
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep)
+
+    assert len(client.requests) == 13
+    assert clock.waits == [5] * 6
+    assert result.report["provider_retry"] == {
+        "attempts": 6, "waiting_seconds": 30.0, "recovered_requests": 6,
+        "stop_reason": "run_retry_limit",
+    }
+    assert result.report["budgets"]["usage"]["tool_calls"] == 6
+    assert result.report["budgets"]["usage"]["iterations"] == 0
+
+
+def test_shared_wait_budget_stops_before_shortening_fallback(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+    client = FakeGeminiClient([
+        TimeoutError(), TimeoutError(), TimeoutError(),
+        FakeResponse(tool_calls=[{"id": "read", "name": "read_file", "args": {"path": "README.md"}}]),
+        TimeoutError(), TimeoutError(), RateLimitError(),
+    ])
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep, jitter=lambda: 1)
+
+    assert clock.waits == [6, 11, 21, 6, 11]
+    assert result.report["provider_retry"] == {
+        "attempts": 5, "waiting_seconds": 55.0, "recovered_requests": 1,
+        "stop_reason": "retry_wait_limit",
+    }
+    assert result.report["errors"][0]["code"] == "provider_rate_limited"
+
+
+def test_only_jitter_is_trimmed_to_fit_the_shared_wait_budget(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+    read = FakeResponse(tool_calls=[{"id": "read", "name": "read_file", "args": {"path": "README.md"}}])
+    client = FakeGeminiClient([
+        TimeoutError(), TimeoutError(), TimeoutError(), read,
+        TimeoutError(), TimeoutError(), read,
+        TimeoutError(), FakeResponse(tool_calls=[
+            {"id": "edit", "name": "apply_patch", "args": {"path": "README.md", "content": "Done.\n"}},
+            {"id": "check", "name": "run_checks", "args": {}},
+        ]),
+    ])
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep, jitter=lambda: 1)
+
+    assert clock.waits == [6, 11, 21, 6, 11, 5]
+    assert result.terminal_outcome == "pr_created"
+    assert result.report["provider_retry"] == {
+        "attempts": 6, "waiting_seconds": 60.0, "recovered_requests": 3,
+    }
+
+
+@pytest.mark.parametrize(("overshoot", "stop"), [(61, "retry_wait_limit"), (1800, "retry_wait_limit")])
+def test_actual_wait_overrun_stops_before_an_additional_request(tmp_path: Path, overshoot: float, stop: str) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+    client = FakeGeminiClient([TimeoutError(), FakeResponse(content="must not execute")])
+
+    def oversleep(seconds: float) -> None:
+        clock.waits.append(seconds)
+        clock.now += overshoot
+
+    result = run_gemini(repository, client, clock=clock, sleep=oversleep)
+
+    assert len(client.requests) == 1
+    assert result.report["provider_retry"] == {
+        "attempts": 0, "waiting_seconds": overshoot, "recovered_requests": 0,
+        "stop_reason": stop,
+    }
+    assert result.report["errors"][0]["category"] == "model"
+
+
+def test_longest_provider_hint_replaces_fallback_wait(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    response = httpx.Response(429, headers={"Retry-After": "12"})
+    error = ClientError(429, {"error": {"details": [{
+        "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "7.5s",
+    }]}}, response=response)
+    wrapped = GoogleRateLimitError("raw-wrapper")
+    wrapped.__cause__ = error
+    client = FakeGeminiClient([wrapped, FakeResponse(tool_calls=[
+        {"id": "edit", "name": "apply_patch", "args": {"path": "README.md", "content": "Done.\n"}},
+        {"id": "check", "name": "run_checks", "args": {}},
+    ])])
+    clock = RetryClock()
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep, jitter=lambda: 0.5)
+
+    assert clock.waits == [12.5]
+    assert result.terminal_outcome == "pr_created"
+    assert result.report["provider_retry"]["waiting_seconds"] == 12.5
+    assert "raw-" not in json.dumps(result.report)
+
+
+@pytest.mark.parametrize(("hint", "expected"), [
+    ("0s", 0), ("1.25s", 1.25), ("-1s", 5), ("NaNs", 5), ("infs", 5),
+    ("1e2s", 5), ("invalid", 5), (True, 5), (None, 5),
+    ("9" * 129 + "s", 5), ("0.1234567891s", 5),
+])
+def test_retry_info_duration_is_bounded_and_invalid_hints_use_fallback(tmp_path: Path, hint: object, expected: float) -> None:
+    repository = configured_repository(tmp_path)
+    error = ClientError(429, {"error": {"details": [{
+        "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": hint,
+    }]}})
+    client = FakeGeminiClient([error, FakeResponse(content="Done")])
+    clock = RetryClock()
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep)
+
+    assert clock.waits == [expected]
+    assert result.report["provider_retry"]["attempts"] == 1
+    assert result.report["provider_retry"]["recovered_requests"] == 1
+    # Obtaining a response is recovery, even when the task produces no patch.
+    assert result.report["errors"][0]["code"] == "empty_patch"
+
+
+@pytest.mark.parametrize(("header", "expected"), [
+    ("3", 3), ("0", 0), ("1.5", 1.5),
+    ("Wed, 14 Oct 2026 00:00:12 GMT", 12),
+    ("Tue, 13 Oct 2026 23:59:59 GMT", 0),
+    ("Wednesday, 14-Oct-26 00:00:12 GMT", 12),
+    ("Wed Oct 14 00:00:12 2026", 12),
+    ("Wed, 14 Oct 2026 00:00:12", 5), ("nonsense", 5),
+    ("Wed, 14 Oct 2026 00:00:12 +0000", 5),
+    ("bad, 14 Oct 2026 00:00:12 GMT", 5),
+    ("14 Oct 2026 00:00:12 GMT", 5),
+    ("Wed, 14 Oct 2026 00:00:12 PST", 5),
+    ("nan", 5), ("inf", 5), ("-5", 5), ("1e9", 5),
+])
+def test_retry_after_supports_duration_and_dates_using_wall_clock(tmp_path: Path, header: str, expected: float) -> None:
+    repository = configured_repository(tmp_path)
+    error = ClientError(429, {}, response=httpx.Response(429, headers={"Retry-After": header}))
+    client = FakeGeminiClient([error, FakeResponse(content="Done")])
+    clock = RetryClock()
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep, wall_clock=lambda: 1791936000.0)
+
+    assert clock.waits == [expected]
+    assert result.report["provider_retry"]["attempts"] == 1
+
+
+@pytest.mark.parametrize(("hint", "elapsed", "waits", "attempts", "reason"), [
+    ("61s", 0, [], 0, "provider_delay_wait_limit"),
+    ("10s", 1790, [], 0, "provider_delay_run_deadline"),
+    ("20s", 0, [20, 20, 20], 3, "request_retry_limit"),
+])
+def test_provider_minimum_wait_cannot_be_shortened_after_edit(tmp_path: Path, hint: str, elapsed: float, waits: list[float], attempts: int, reason: str) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+    error = ClientError(429, {"error": {"details": [{
+        "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": hint,
+    }]}})
+
+    class ElapsedClient(FakeGeminiClient):
+        def invoke(self, messages: list[object], *, timeout: float = 60) -> FakeResponse:
+            if self.requests and not clock.now:
+                clock.now = elapsed
+            return super().invoke(messages, timeout=timeout)
+
+    client = ElapsedClient([
+        FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {"path": "README.md", "content": "Unverified.\n"}}]),
+        error, error, error, error,
+    ])
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep)
+
+    assert clock.waits == waits
+    assert result.report["provider_retry"]["attempts"] == attempts
+    assert result.report["provider_retry"]["stop_reason"] == reason
+    assert result.patch is None
+    assert result.publication["intent"] == "none"
+    assert result.report["errors"][0]["code"] == "provider_rate_limited"
+    assert result.report["budgets"]["resource_limit_events"] == []
+
+
+def test_each_request_timeout_shrinks_with_remaining_runtime(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+
+    class SlowClient(FakeGeminiClient):
+        def invoke(self, messages: list[object], *, timeout: float = 60) -> FakeResponse:
+            if not self.requests:
+                clock.now += 1780
+            return super().invoke(messages, timeout=timeout)
+
+    client = SlowClient([
+        TimeoutError(),
+        FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {"path": "README.md", "content": "Done.\n"}}]),
+        FakeResponse(tool_calls=[{"id": "check", "name": "run_checks", "args": {}}]),
+    ])
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep)
+
+    assert result.terminal_outcome == "pr_created"
+    assert client.timeouts == [60, 15, 15]
+    assert result.report["provider_retry"]["waiting_seconds"] == 5
+
+
+def test_deadline_is_rechecked_immediately_before_waiting(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+    client = FakeGeminiClient([TimeoutError(), FakeResponse(content="must not execute")])
+
+    def delayed_jitter() -> float:
+        clock.now = 1795
+        return 0
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep, jitter=delayed_jitter)
+
+    assert clock.waits == []
+    assert len(client.requests) == 1
+    assert result.report["provider_retry"] == {
+        "attempts": 0, "waiting_seconds": 0, "recovered_requests": 0,
+        "stop_reason": "run_deadline",
+    }
+
+
+def test_submillisecond_runtime_cannot_disable_sdk_request_timeout(tmp_path: Path) -> None:
+    repository = configured_repository(tmp_path)
+    clock = RetryClock()
+    error = ClientError(429, {}, response=httpx.Response(429, headers={"Retry-After": "0"}))
+
+    class NearlyExpiredClient(FakeGeminiClient):
+        def invoke(self, messages: list[object], *, timeout: float = 60) -> FakeResponse:
+            if self.requests:
+                clock.now = 1799.9995
+            return super().invoke(messages, timeout=timeout)
+
+    client = NearlyExpiredClient([
+        FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {"path": "README.md", "content": "Unverified.\n"}}]),
+        error,
+        FakeResponse(tool_calls=[{"id": "checks", "name": "run_checks", "args": {}}]),
+    ])
+
+    result = run_gemini(repository, client, clock=clock, sleep=clock.sleep)
+
+    assert client.timeouts == [60, 60]
+    assert clock.waits == []
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.publication["intent"] == "none"
+    assert result.report["errors"][0]["code"] == "provider_rate_limited"
+    assert result.report["provider_retry"]["attempts"] == 0
+    assert result.report["provider_retry"]["stop_reason"] == "run_deadline"
 
 
 def quota_failure(violation: object, *, details_shape: str = "body") -> ClientError:
@@ -123,11 +448,11 @@ def test_ambiguous_or_malformed_quota_details_do_not_establish_daily_exhaustion(
         "message": "daily quota exhausted GenerateRequestsPerDayPerProjectPerModel-FreeTier",
     }})
     error.details = details
-    client = FakeGeminiClient([error, error])
+    client = FakeGeminiClient([error] * 4)
 
     result = run_gemini(repository, client)
 
-    assert len(client.requests) == 2
+    assert len(client.requests) == 4
     assert result.report["errors"][0]["code"] == "provider_rate_limited"
     assert "daily quota exhausted" not in json.dumps(result.report)
 
@@ -182,12 +507,12 @@ def test_provider_exception_chains_are_bounded_and_respect_suppressed_context(
         wrapper.__suppress_context__ = True
     else:
         wrapper.__cause__ = wrapper
-    client = FakeGeminiClient([wrapper, wrapper])
+    client = FakeGeminiClient([wrapper] * 4)
 
     result = run_gemini(repository, client)
 
     if chain_kind in {"cause", "context"}:
-        assert len(client.requests) == 2
+        assert len(client.requests) == 4
         assert result.report["errors"][0]["code"] == "provider_timeout"
     else:
         assert len(client.requests) == 1
@@ -244,11 +569,11 @@ def test_provider_failure_returned_after_deadline_does_not_publish_existing_edit
     now = 0.0
 
     class DelayedFailureClient(FakeGeminiClient):
-        def invoke(self, messages: list[object]) -> FakeResponse:
+        def invoke(self, messages: list[object], *, timeout: float = 60.0) -> FakeResponse:
             nonlocal now
             if self.requests:
                 now = 1801.0
-            return super().invoke(messages)
+            return super().invoke(messages, timeout=timeout)
 
     client = DelayedFailureClient([
         FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {
@@ -517,7 +842,7 @@ def test_provider_failures_are_stable_and_redacted(
     expected_code: str,
 ) -> None:
     repository = configured_repository(tmp_path)
-    client = FakeGeminiClient([provider_error, provider_error])
+    client = FakeGeminiClient([provider_error] * 4)
 
     result = run_gemini(repository, client)
 
@@ -533,7 +858,7 @@ def test_provider_failures_are_stable_and_redacted(
             }[expected_code],
         }
     ]
-    assert len(client.requests) == (1 if expected_code == "provider_error" else 2)
+    assert len(client.requests) == (1 if expected_code == "provider_error" else 4)
     assert "AIzaSySecret" not in str(result.report)
 
 
@@ -632,6 +957,7 @@ def test_repeated_provider_failure_after_edit_preserves_the_provider_error(
             ),
             TimeoutError("AIzaSySecretFirstProvider123456789"),
             RateLimitError("AIzaSySecretSecondProvider123456789"),
+            RateLimitError("raw-third"), RateLimitError("raw-last"),
         ]
     )
 
@@ -649,8 +975,8 @@ def test_repeated_provider_failure_after_edit_preserves_the_provider_error(
     assert repository.joinpath("README.md").read_text() == (
         "Unverified provider recovery.\n"
     )
-    assert len(client.requests) == 3
-    assert len(client.requests[1]) == len(client.requests[2])
+    assert len(client.requests) == 5
+    assert client.requests[1] == client.requests[2] == client.requests[3] == client.requests[4]
     assert "decision_after_edit" not in str(result.report)
     assert "AIzaSySecret" not in str(result.report)
     assert "AIzaSySecret" not in str(client.requests)
@@ -730,19 +1056,26 @@ def run_gemini(
     client: FakeGeminiClient,
     *,
     model_name: str = "gemini-3.5-flash-lite",
-    clock: Callable[[], float] = monotonic,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    jitter: Callable[[], float] = lambda: 0.0,
+    wall_clock: Callable[[], float] = lambda: 1791936000.0,
 ):
+    retry_clock = RetryClock()
     return run(
         RunRequest(
             task=TaskSnapshot("issue-108", "Update greeting", "Change the README."),
             repository=repository,
             config=load_repository_config(repository / ".patchloop.yml"),
             adapters=RunAdapters(
-                clock=clock,
+                clock=clock or retry_clock,
+                sleep=sleep or retry_clock.sleep,
+                jitter=jitter,
                 model=GeminiPatchModelAdapter(
                     model_name=model_name,
                     api_key="AIzaSyDedicatedPatchLoopKey123456789",
                     client=client,
+                    wall_clock=wall_clock,
                 ),
                 verifier=DeterministicVerifierAdapter(
                     VerificationResult.passed(("check greeting",))

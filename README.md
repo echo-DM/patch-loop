@@ -171,6 +171,11 @@ failure 属于不同阶段，不应仅凭“没有 PR”判断原因。
 | `no_change` | `not_run` | 在 Issue 反馈中说明原因；不创建 branch 或 PR。 |
 | `failed` | setup、infrastructure、model、authorization、configuration 或 budget failure | 提供可执行的反馈或摘要（summary）；不创建空 PR。 |
 
+Agent 的 Run Report 可包含 `provider_retry` 安全摘要；Actions 分别显示额外请求次数、
+累计等待、恢复的请求数和适用的停止原因。请求恢复不代表整次任务成功，仍应查看
+Terminal outcome 和 Checks；旧报告没有该字段时仍可展示。固定重试预算、服务端等待
+建议、动态请求超时和字段说明见 [Gemini 文档](docs/gemini.md#retry-report-and-actions-summary)。
+
 PatchLoop 不会将 PR 标记为 ready，不会 approve、merge、force-push、rebase 或解决 merge
 conflict。已关闭但未合并的 PatchLoop PR 会阻止系统静默重建；PR 合并后，该 Issue 的
 自动化工作随即结束。
