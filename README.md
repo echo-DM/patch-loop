@@ -46,10 +46,12 @@ reusable workflow 会按 job 缩减权限。它只传入指定的 Gemini Secret�
 `secrets: inherit`。caller 中无权限的 `preflight` job 只判断该 Secret 是否存在，
 不会读取或输出其值；缺少 Secret 时，credentialed job 会安全跳过。
 
-当前示例固定到在 `patchloop-sorting-lab` 中通过真实 GitHub Actions/Gemini 端到端验证的
-commit `d9fd688fa9b65daf95eb8fea5bf912a368f6b1cd`。若要最稳妥地固定供应链版本
+当前示例固定到 commit `00e292cf4e52807182b5574f1998f2003a463283`，包含有界 provider
+重试、4000 字符 completion 文本上限和示例的 2000 行 diff 预算。该 commit 尚未重新
+完成 Live smoke；此前在 `patchloop-sorting-lab` 中通过真实 GitHub Actions/Gemini
+端到端验证的是 `d9fd688fa9b65daf95eb8fea5bf912a368f6b1cd`。若要最稳妥地固定供应链版本
 （supply-chain pin），请继续使用完整且不可变的 SHA；不要从 `main` 或其他会变动的
-branch 安装。`v0.1.0` 不包含其发布之后加入、并已包含在该 SHA 中的 provider recovery
+branch 安装。`v0.1.0` 不包含其发布之后加入、并已包含在当前 SHA 中的 provider recovery
 和多文件 patch 发布修复；后续 release tag 只有在独立 Live smoke 完成后才应替换示例
 中的 SHA。
 
@@ -92,9 +94,9 @@ verifier:
 budgets:
   max_iterations: 3
   max_tool_calls: 60
-  max_changed_files: 2
+  max_changed_files: 10
   max_diff_lines: 2000
-  max_wall_time_minutes: 10
+  max_wall_time_minutes: 20
 ```
 
 | 字段 | 含义与允许范围 |
@@ -119,8 +121,10 @@ budgets:
 
 上面的 Python/uv 验证环境已在 `patchloop-sorting-lab` 中完成真实 GitHub Actions/Gemini
 端到端验证。`uv` 的 cache 和 project environment 被放到 container 的 `/tmp`，避免依赖
-安装尝试写入挂载的目标仓库。该小型任务使用 `max_changed_files: 2` 和
-`max_diff_lines: 300`；当前通用示例将 `max_diff_lines` 设置为 `2000`。
+安装尝试写入挂载的目标仓库。该小型任务使用 `max_changed_files: 2`、
+`max_diff_lines: 300` 和 `max_wall_time_minutes: 10`。当前通用示例面向日常修复，
+允许修改 10 个文件、产生最多 2000 行 diff，并运行最多 20 分钟，为实现、测试和文档
+修改，以及验证和模型调用留出空间；这组预算尚未重新完成 Live smoke。
 这些预算不是省略字段时的默认值；目标仓库应按预期 Issue 范围调整，但不能超过表中的固定上限。
 当前 schema 要求 `setup` 至少包含一条命令；无需安装步骤时可以使用只读的
 `uv --version` 一类环境检查。

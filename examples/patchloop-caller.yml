@@ -35,7 +35,7 @@ jobs:
   patchloop:
     needs: preflight
     if: needs.preflight.outputs.enabled == 'true'
-    uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@d9fd688fa9b65daf95eb8fea5bf912a368f6b1cd
+    uses: echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@00e292cf4e52807182b5574f1998f2003a463283
     with:
       config_path: .patchloop.yml
     secrets:

@@ -284,7 +284,7 @@ def test_minimal_caller_preflights_the_secret_and_serializes_runs_per_issue() ->
     assert call["if"] == "needs.preflight.outputs.enabled == 'true'"
     assert call["uses"] == (
         "echo-DM/patch-loop/.github/workflows/patchloop-reusable.yml@"
-        "d9fd688fa9b65daf95eb8fea5bf912a368f6b1cd"
+        "00e292cf4e52807182b5574f1998f2003a463283"
     )
     assert call["with"] == {"config_path": ".patchloop.yml"}
     assert call["secrets"] == {
@@ -305,9 +305,9 @@ def test_python_uv_example_uses_the_documented_configuration() -> None:
     assert config.verifier.limits.memory_mb == 1024
     assert config.verifier.limits.pids == 256
     assert config.verifier.limits.output_bytes == 200000
-    assert config.budgets.max_changed_files == 2
+    assert config.budgets.max_changed_files == 10
     assert config.budgets.max_diff_lines == 2000
-    assert config.budgets.max_wall_time_minutes == 10
+    assert config.budgets.max_wall_time_minutes == 20
 
 
 def test_gate_freezes_only_an_authorized_issue_for_the_agent(tmp_path: Path) -> None:
