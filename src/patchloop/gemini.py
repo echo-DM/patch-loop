@@ -17,6 +17,7 @@ from patchloop.adapters import (
     ToolResult,
 )
 from patchloop.errors import ConfigError
+from patchloop.provider_errors import normalize_provider_failure
 from patchloop.sanitize import redact_text
 
 
@@ -178,23 +179,12 @@ class GeminiPatchModelAdapter:
 
     @staticmethod
     def _provider_failure(error: BaseException) -> EvaluationDecision:
-        status = getattr(error, "status_code", None)
-        code = getattr(error, "code", None)
-        class_name = type(error).__name__.lower()
-        if isinstance(error, TimeoutError) or "timeout" in class_name:
-            error_code = "provider_timeout"
-            message = "The Gemini request timed out."
-        elif status == 429 or code == 429 or "ratelimit" in class_name or "resourceexhausted" in class_name:
-            error_code = "provider_rate_limited"
-            message = "The Gemini request was rate limited."
-        else:
-            error_code = "provider_error"
-            message = "The Gemini provider could not complete the request."
+        failure = normalize_provider_failure(error)
         return EvaluationDecision(
             terminal_outcome="failed",
             summary="Gemini could not continue the controlled patch task.",
-            actionable_message=message,
-            errors=({"category": "model", "code": error_code, "message": message},),
+            actionable_message=failure.message,
+            errors=({"category": "model", "code": failure.value, "message": failure.message},),
         )
 
 

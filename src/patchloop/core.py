@@ -33,6 +33,7 @@ from patchloop.controlled_tools import (
 )
 from patchloop.errors import ConfigError, InfrastructureError
 from patchloop.graph import evaluate_task
+from patchloop.provider_errors import ProviderFailure
 from patchloop.sanitize import redact_text
 
 
@@ -404,12 +405,18 @@ def _run_patch(
     tool_calls = 0
     completion = None
     error: ReportEvent | None = None
-    provider_retry_error: ReportEvent | None = None
+    provider_retry_used = False
     for _ in range(config.budgets.max_tool_calls + 1):
         if (error := check_wall_time()) is not None:
             break
         turn = model.next_turn(task, observations, tools.definitions)
         if (error := check_wall_time()) is not None:
+            # A returned provider failure must not become budget exhaustion,
+            # which can authorize publication of an existing partial patch.
+            if not turn.tool_calls and turn.completion is None and turn.decision is not None:
+                provider_failure = _provider_failure_event(turn.decision)
+                if provider_failure is not None:
+                    error = provider_failure
             break
         selected_actions = sum(
             (
@@ -428,10 +435,13 @@ def _run_patch(
         if turn.decision is not None:
             provider_failure = _provider_failure_event(turn.decision)
             if provider_failure is not None:
-                if provider_retry_error is None:
-                    provider_retry_error = provider_failure
+                if not ProviderFailure(provider_failure["code"]).retryable:
+                    error = provider_failure
+                    break
+                if not provider_retry_used:
+                    provider_retry_used = True
                     continue
-                error = provider_retry_error
+                error = provider_failure
                 break
             if tools.patch_bundle() is not None:
                 error = {
@@ -688,16 +698,16 @@ def _provider_failure_event(
     if decision.terminal_outcome != "failed" or len(decision.errors) != 1:
         return None
     event = decision.errors[0]
-    if event.get("category") != "model" or event.get("code") not in {
-        "provider_timeout",
-        "provider_rate_limited",
-        "provider_error",
-    }:
+    if event.get("category") != "model":
+        return None
+    try:
+        failure = ProviderFailure(event.get("code", ""))
+    except ValueError:
         return None
     return {
-        "category": event["category"],
-        "code": event["code"],
-        "message": event["message"],
+        "category": "model",
+        "code": failure.value,
+        "message": failure.message,
     }
 
 

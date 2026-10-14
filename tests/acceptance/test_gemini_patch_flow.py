@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pytest
+import httpx
+from google.genai.errors import ClientError, ServerError
+from langchain_google_genai.chat_models import GoogleAPIError, GoogleRateLimitError
 from langchain_core.messages import ToolMessage
 
 from patchloop.adapters import (
@@ -47,6 +52,287 @@ class FakeGeminiClient:
 
 class RateLimitError(Exception):
     status_code = 429
+
+
+def quota_failure(violation: object, *, details_shape: str = "body") -> ClientError:
+    details = [{
+        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+        "violations": [violation],
+    }]
+    payload: object = {"error": {
+        "status": "RESOURCE_EXHAUSTED", "message": "raw-quota-body", "details": details,
+    }}
+    error = ClientError(429, payload)
+    if details_shape == "list":
+        error.details = details
+    elif details_shape == "flat":
+        error.details = {"details": details}
+    return error
+
+
+@pytest.mark.parametrize("details_shape", ["body", "flat", "list"])
+@pytest.mark.parametrize("violation", [
+    {"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"},
+    {"quotaId": "GenerateRequestsPerDayPerProjectPerModel"},
+    {"quotaId": "GenerateContentInputTokensPerModelPerDay-FreeTier"},
+    {"quotaId": "GenerateContentInputTokensPerModelPerDay"},
+    {"quotaMetric": "generativelanguage.googleapis.com/generate_requests_per_model_per_day"},
+])
+def test_confirmed_daily_quota_exhaustion_stops_the_pending_request(
+    tmp_path: Path, details_shape: str, violation: object, caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = configured_repository(tmp_path)
+    wrapped = GoogleRateLimitError("raw-quota-wrapper")
+    wrapped.__cause__ = quota_failure(violation, details_shape=details_shape)
+    client = FakeGeminiClient([wrapped, FakeResponse(content="must not execute")])
+
+    result = run_gemini(repository, client)
+
+    assert len(client.requests) == 1
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.publication == {"intent": "none", "reason": "failed"}
+    assert result.report["errors"] == [{
+        "category": "model",
+        "code": "provider_daily_quota_exhausted",
+        "message": "Gemini's daily quota is exhausted. Check the project's quota in AI Studio and rerun after the daily allowance resets.",
+    }]
+    assert result.report["actionable_message"] == result.report["errors"][0]["message"]
+    assert "raw-" not in json.dumps(result.report)
+    assert "raw-" not in str(client.requests)
+    assert "raw-" not in caplog.text
+
+
+@pytest.mark.parametrize("details", [
+    None,
+    "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+    {"error": {"details": "malformed"}},
+    [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": "malformed"}],
+    [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [None, {"quotaId": 123}]}],
+    [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{"quotaId": "UnknownPerDayQuota"}]}],
+    [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{"quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]}],
+    [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}],
+    [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{"quotaId": "x" * 10_000}]}],
+])
+def test_ambiguous_or_malformed_quota_details_do_not_establish_daily_exhaustion(
+    tmp_path: Path, details: object,
+) -> None:
+    repository = configured_repository(tmp_path)
+    error = ClientError(429, {"error": {
+        "status": "RESOURCE_EXHAUSTED",
+        "message": "daily quota exhausted GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+    }})
+    error.details = details
+    client = FakeGeminiClient([error, error])
+
+    result = run_gemini(repository, client)
+
+    assert len(client.requests) == 2
+    assert result.report["errors"][0]["code"] == "provider_rate_limited"
+    assert "daily quota exhausted" not in json.dumps(result.report)
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("raw-unknown"),
+    ClientError(400, {}), ClientError(401, {}), ClientError(403, {}), ClientError(404, {}),
+    ClientError(422, {}), ServerError(501, {}),
+    httpx.LocalProtocolError("raw-invalid-protocol"),
+    quota_failure({"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}),
+])
+def test_non_retryable_provider_failure_after_edit_never_publishes_the_patch(
+    tmp_path: Path, failure: BaseException,
+) -> None:
+    repository = configured_repository(tmp_path)
+    client = FakeGeminiClient([
+        FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {
+            "path": "README.md", "content": "Unverified local edit.\n",
+        }}]),
+        failure,
+        FakeResponse(tool_calls=[{"id": "checks", "name": "run_checks", "args": {}}]),
+    ])
+
+    result = run_gemini(repository, client)
+
+    assert len(client.requests) == 2
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.report["patch"] is None
+    assert result.publication == {"intent": "none", "reason": "failed"}
+    assert result.verification["status"] == "not_run"
+    assert result.report["errors"][0]["category"] == "model"
+    assert result.report["budgets"]["resource_limit_events"] == []
+    assert result.report["budgets"]["usage"]["tool_calls"] == 1
+    assert "decision_after_edit" not in json.dumps(result.report)
+    assert "raw-" not in json.dumps(result.report)
+
+
+@pytest.mark.parametrize("chain_kind", ["cause", "context", "cycle", "suppressed"])
+def test_provider_exception_chains_are_bounded_and_respect_suppressed_context(
+    tmp_path: Path, chain_kind: str,
+) -> None:
+    repository = configured_repository(tmp_path)
+    wrapper = RuntimeError("raw-wrapper")
+    cause = TimeoutError("raw-timeout")
+    if chain_kind == "cause":
+        wrapper.__cause__ = cause
+    elif chain_kind == "context":
+        wrapper.__context__ = cause
+    elif chain_kind == "suppressed":
+        wrapper.__context__ = cause
+        wrapper.__suppress_context__ = True
+    else:
+        wrapper.__cause__ = wrapper
+    client = FakeGeminiClient([wrapper, wrapper])
+
+    result = run_gemini(repository, client)
+
+    if chain_kind in {"cause", "context"}:
+        assert len(client.requests) == 2
+        assert result.report["errors"][0]["code"] == "provider_timeout"
+    else:
+        assert len(client.requests) == 1
+        assert result.report["errors"][0]["code"] == "provider_error"
+    assert "raw-" not in json.dumps(result.report)
+
+
+def test_http_response_status_is_normalized_without_persisting_response_data(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = configured_repository(tmp_path)
+    response = httpx.Response(403, text="raw-body", headers={"x-raw": "raw-header"})
+    error = httpx.HTTPStatusError(
+        "raw-message", request=httpx.Request("POST", "https://example.invalid/raw-url"),
+        response=response,
+    )
+    client = FakeGeminiClient([error])
+
+    result = run_gemini(repository, client)
+
+    assert len(client.requests) == 1
+    assert result.report["errors"][0]["code"] == "provider_permission_denied"
+    assert "raw-" not in json.dumps(result.report)
+    assert "raw-" not in str(client.requests)
+    assert "raw-" not in caplog.text
+
+
+def test_sdk_rate_limit_metadata_confirms_daily_exhaustion_without_http_status(
+    tmp_path: Path,
+) -> None:
+    repository = configured_repository(tmp_path)
+    error = GoogleRateLimitError("raw-sdk-message")
+    error.details = quota_failure({
+        "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+    }).details
+    client = FakeGeminiClient([error])
+
+    result = run_gemini(repository, client)
+
+    assert len(client.requests) == 1
+    assert result.report["errors"][0]["code"] == "provider_daily_quota_exhausted"
+
+
+@pytest.mark.parametrize("failure", [
+    ClientError(401, {}),
+    quota_failure({"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}),
+    RuntimeError("raw-unknown"),
+    TimeoutError("raw-timeout"),
+])
+def test_provider_failure_returned_after_deadline_does_not_publish_existing_edits(
+    tmp_path: Path, failure: BaseException,
+) -> None:
+    repository = configured_repository(tmp_path)
+    now = 0.0
+
+    class DelayedFailureClient(FakeGeminiClient):
+        def invoke(self, messages: list[object]) -> FakeResponse:
+            nonlocal now
+            if self.requests:
+                now = 1801.0
+            return super().invoke(messages)
+
+    client = DelayedFailureClient([
+        FakeResponse(tool_calls=[{"id": "edit", "name": "apply_patch", "args": {
+            "path": "README.md", "content": "Unverified timed edit.\n",
+        }}]),
+        failure,
+    ])
+
+    result = run_gemini(repository, client, clock=lambda: now)
+
+    assert len(client.requests) == 2
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.publication == {"intent": "none", "reason": "failed"}
+    assert result.verification["status"] == "not_run"
+    assert result.report["errors"][0]["category"] == "model"
+    assert result.report["budgets"]["usage"]["wall_time_minutes"] == 30
+    assert result.report["budgets"]["resource_limit_events"] == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConnectionError("raw-connection"),
+        httpx.ConnectError("raw-connect"),
+        httpx.ReadError("raw-read"),
+        httpx.RemoteProtocolError("raw-disconnect"),
+        httpx.ReadTimeout("raw-timeout"),
+        ClientError(408, {"error": {"message": "raw-timeout"}}),
+        ClientError(429, {"error": {"status": "RESOURCE_EXHAUSTED"}}),
+        GoogleRateLimitError("raw-rate-limit"),
+        ServerError(500, {"error": {"message": "raw-server"}}),
+        ServerError(502, {"error": {"message": "raw-server"}}),
+        GoogleAPIError(503, {"error": {"message": "raw-server"}}),
+        ServerError(504, {"error": {"message": "raw-server"}}),
+    ],
+)
+def test_recognized_transient_provider_failure_can_recover(
+    tmp_path: Path, failure: BaseException,
+) -> None:
+    repository = configured_repository(tmp_path)
+    client = FakeGeminiClient([
+        failure,
+        FakeResponse(tool_calls=[
+            {"id": "edit", "name": "apply_patch", "args": {
+                "path": "README.md", "content": "Recovered.\n",
+            }},
+            {"id": "checks", "name": "run_checks", "args": {}},
+        ]),
+    ])
+
+    result = run_gemini(repository, client)
+
+    assert result.terminal_outcome == "pr_created"
+    assert result.report["errors"] == []
+    assert len(client.requests) == 2
+    assert client.requests[0] == client.requests[1]
+    assert result.report["budgets"]["usage"]["tool_calls"] == 2
+    assert "raw-" not in str(client.requests)
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [(400, "provider_invalid_request"), (401, "provider_authentication_failed"),
+     (403, "provider_permission_denied"), (404, "provider_model_not_found")],
+)
+def test_permanent_provider_failures_stop_without_a_second_request(
+    tmp_path: Path, status: int, expected_code: str,
+) -> None:
+    repository = configured_repository(tmp_path)
+    cause = ClientError(status, {"error": {"message": "raw-provider-body"}})
+    wrapped = RuntimeError("raw-sdk-wrapper")
+    wrapped.__cause__ = cause
+    client = FakeGeminiClient([wrapped, FakeResponse(content="must not execute")])
+
+    result = run_gemini(repository, client)
+
+    assert len(client.requests) == 1
+    assert result.terminal_outcome == "failed"
+    assert result.patch is None
+    assert result.publication == {"intent": "none", "reason": "failed"}
+    assert result.report["errors"][0]["code"] == expected_code
+    assert "raw-" not in json.dumps(result.report)
+    assert "raw-" not in str(client.requests)
 
 
 def test_gemini_tool_calls_drive_only_the_controlled_patch_flow(tmp_path: Path) -> None:
@@ -247,7 +533,7 @@ def test_provider_failures_are_stable_and_redacted(
             }[expected_code],
         }
     ]
-    assert len(client.requests) == 2
+    assert len(client.requests) == (1 if expected_code == "provider_error" else 2)
     assert "AIzaSySecret" not in str(result.report)
 
 
@@ -255,7 +541,7 @@ def test_initial_provider_failure_retries_the_pending_turn(tmp_path: Path) -> No
     repository = configured_repository(tmp_path)
     client = FakeGeminiClient(
         [
-            RuntimeError("AIzaSySecretInitialProvider123456789"),
+            TimeoutError("AIzaSySecretInitialProvider123456789"),
             FakeResponse(
                 tool_calls=[
                     {
@@ -303,7 +589,7 @@ def test_provider_failure_after_edit_retries_the_pending_turn(
                     },
                 ]
             ),
-            RuntimeError("AIzaSySecretTransientProvider123456789"),
+            TimeoutError("AIzaSySecretTransientProvider123456789"),
             FakeResponse(
                 tool_calls=[
                     {"id": "checks", "name": "run_checks", "args": {}},
@@ -344,8 +630,8 @@ def test_repeated_provider_failure_after_edit_preserves_the_provider_error(
                     },
                 ]
             ),
-            RuntimeError("AIzaSySecretFirstProvider123456789"),
-            RuntimeError("AIzaSySecretSecondProvider123456789"),
+            TimeoutError("AIzaSySecretFirstProvider123456789"),
+            RateLimitError("AIzaSySecretSecondProvider123456789"),
         ]
     )
 
@@ -356,8 +642,8 @@ def test_repeated_provider_failure_after_edit_preserves_the_provider_error(
     assert result.report["errors"] == [
         {
             "category": "model",
-            "code": "provider_error",
-            "message": "The Gemini provider could not complete the request.",
+            "code": "provider_rate_limited",
+            "message": "The Gemini request was rate limited.",
         }
     ]
     assert repository.joinpath("README.md").read_text() == (
@@ -444,6 +730,7 @@ def run_gemini(
     client: FakeGeminiClient,
     *,
     model_name: str = "gemini-3.5-flash-lite",
+    clock: Callable[[], float] = monotonic,
 ):
     return run(
         RunRequest(
@@ -451,6 +738,7 @@ def run_gemini(
             repository=repository,
             config=load_repository_config(repository / ".patchloop.yml"),
             adapters=RunAdapters(
+                clock=clock,
                 model=GeminiPatchModelAdapter(
                     model_name=model_name,
                     api_key="AIzaSyDedicatedPatchLoopKey123456789",

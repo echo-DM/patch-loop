@@ -1,7 +1,7 @@
 # Bounded provider retries for Gemini free-tier use
 
-Status: Design confirmed on 2026-10-14. Runtime implementation has not started
-and was not authorized by this design interview.
+Status: Design confirmed on 2026-10-14. Ticket 01 was implemented and validated
+on 2026-10-14 after separate authorization. Tickets 02-04 remain unimplemented.
 
 This specification records the retry-policy design confirmed on 2026-10-14.
 The policies below are implementation requirements, not claims about current
@@ -44,10 +44,13 @@ waiting and run-time budgets.
 
 - [core.py](../../src/patchloop/core.py) provides one additional provider retry
   across the entire run, immediately, without resetting eligibility after a
-  successful response. Its final provider error is the first failure's error.
-- [gemini.py](../../src/patchloop/gemini.py) maps exceptions to timeout,
-  rate-limited, or generic provider errors. The core currently treats all three
-  as retryable, without distinguishing permanent errors or daily quota exhaustion.
+  successful response. Ticket 01 changes its final report to the last failure
+  and stops immediately for non-retryable provider failures.
+- [gemini.py](../../src/patchloop/gemini.py) normalizes SDK exceptions through
+  [provider_errors.py](../../src/patchloop/provider_errors.py), distinguishing
+  recognized transient failures, permanent failures, structured daily quota
+  exhaustion, and unknown exceptions. Current behavior is documented in
+  [docs/gemini.md](../../docs/gemini.md).
 - The adapter rolls back the failed turn's appended inputs before another
   attempt; completed controlled tool actions are not repeated.
 - [Gemini acceptance tests](../../tests/acceptance/test_gemini_patch_flow.py)

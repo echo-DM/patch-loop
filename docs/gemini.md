@@ -43,10 +43,52 @@ Function calls are proposals; PatchLoop validates names, arguments, paths,
 budgets, and patch policy before executing them. API keys and complete provider
 message history are not written to LangGraph state, logs, artifacts, or reports.
 Provider calls use a 60-second request timeout and do not perform hidden SDK
-retries. The PatchLoop harness may retry one recoverable provider failure within
-the existing tool and wall-time budgets, including a failure after edits, while
-preserving stable error codes and excluding provider exception text from
-persistent output.
+retries. The PatchLoop harness currently allows one immediate additional request
+across the entire run for a recognized transient provider failure, within the
+existing tool and wall-time budgets. It retries the pending turn, including after
+edits, without replaying completed tools or duplicating pending observations.
+Multiple retries, backoff, and a timeout based on remaining run time are later
+tickets in the [provider retry specification](../.scratch/provider-retry-policy/spec.md).
+
+## Provider failures
+
+The adapter normalizes provider failures to fixed codes and messages; raw
+exception text, response bodies, headers, URLs, and quota identifiers are not
+added to model context, reports, or logs. It inspects at most eight linked
+exceptions, respecting explicit causes and suppressed contexts. Recognized
+HTTP status codes take precedence over transport exception types; names or
+message substrings alone do not establish retry eligibility.
+
+| Failure | Stable code | Retry eligibility |
+| --- | --- | --- |
+| Recognized timeout or HTTP 408 | `provider_timeout` | Yes |
+| Recognized connection/network failure | `provider_connection_failed` | Yes |
+| HTTP 429 or a recognized SDK rate-limit exception without confirmed daily exhaustion | `provider_rate_limited` | Yes |
+| HTTP 500/502/503/504 | `provider_unavailable` | Yes |
+| HTTP 400 or recognized invalid-request exception | `provider_invalid_request` | No |
+| HTTP 401 or recognized authentication exception | `provider_authentication_failed` | No |
+| HTTP 403 or recognized permission exception | `provider_permission_denied` | No |
+| HTTP 404 or recognized model-not-found exception | `provider_model_not_found` | No |
+| Confirmed daily quota exhaustion | `provider_daily_quota_exhausted` | No |
+| Other HTTP errors or unclassified exceptions | `provider_error` | No |
+
+Daily quota exhaustion requires a structured
+`type.googleapis.com/google.rpc.QuotaFailure` violation in a rate-limit failure.
+The adapter recognizes the exact `GenerateRequestsPerDayPerProjectPerModel` and
+`GenerateContentInputTokensPerModelPerDay` quota IDs, each with or without the
+`-FreeTier` suffix, or the metric
+`generativelanguage.googleapis.com/generate_requests_per_model_per_day`.
+It examines at most 32 detail entries and 32 violations per entry, with quota
+identifiers bounded to 256 characters. Malformed, unknown, or out-of-bound
+details do not confirm daily exhaustion. A 429, `RESOURCE_EXHAUSTED`, or a message
+about a daily limit alone is insufficient. The daily-exhaustion message directs
+the user to check the project's quota in AI Studio and rerun after it resets.
+
+Failures that cannot be retried stop immediately. If the additional request
+also fails, the report records the last normalized failure. Provider failures
+retain category `model` and end with `failed`, no publication intent, and no
+returned patch, even after local edits. They do not enter the budget-exhaustion
+branch that can preserve a partial patch for publication.
 
 ## Tool semantics and argument recovery
 
