@@ -15,5 +15,5 @@ budgets:
   max_iterations: 3
   max_tool_calls: 60
   max_changed_files: 2
-  max_diff_lines: 300
+  max_diff_lines: 2000
   max_wall_time_minutes: 10

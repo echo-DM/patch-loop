@@ -292,7 +292,7 @@ def test_minimal_caller_preflights_the_secret_and_serializes_runs_per_issue() ->
     }
 
 
-def test_python_uv_example_uses_the_end_to_end_validated_configuration() -> None:
+def test_python_uv_example_uses_the_documented_configuration() -> None:
     config = load_repository_config(EXAMPLE_CONFIG)
 
     assert config.model == "gemini-3.5-flash-lite"
@@ -306,7 +306,7 @@ def test_python_uv_example_uses_the_end_to_end_validated_configuration() -> None
     assert config.verifier.limits.pids == 256
     assert config.verifier.limits.output_bytes == 200000
     assert config.budgets.max_changed_files == 2
-    assert config.budgets.max_diff_lines == 300
+    assert config.budgets.max_diff_lines == 2000
     assert config.budgets.max_wall_time_minutes == 10
 
 

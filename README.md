@@ -93,7 +93,7 @@ budgets:
   max_iterations: 3
   max_tool_calls: 60
   max_changed_files: 2
-  max_diff_lines: 300
+  max_diff_lines: 2000
   max_wall_time_minutes: 10
 ```
 
@@ -117,10 +117,11 @@ budgets:
 仓库可以调低 verifier limit 或预算（budget），但不能超过固定上限。运行前由维护者
 选择命令；Gemini 无法添加 shell 命令或扩大权限。
 
-上面的 Python/uv 配置已在 `patchloop-sorting-lab` 中完成真实 GitHub Actions/Gemini
+上面的 Python/uv 验证环境已在 `patchloop-sorting-lab` 中完成真实 GitHub Actions/Gemini
 端到端验证。`uv` 的 cache 和 project environment 被放到 container 的 `/tmp`，避免依赖
-安装尝试写入挂载的目标仓库。`max_changed_files: 2` 和 `max_diff_lines: 300` 是该小型任务
-的限制，不是通用默认值；目标仓库应按预期 Issue 范围调整，但不能超过表中的固定上限。
+安装尝试写入挂载的目标仓库。该小型任务使用 `max_changed_files: 2` 和
+`max_diff_lines: 300`；当前通用示例将 `max_diff_lines` 设置为 `2000`。
+这些预算不是省略字段时的默认值；目标仓库应按预期 Issue 范围调整，但不能超过表中的固定上限。
 当前 schema 要求 `setup` 至少包含一条命令；无需安装步骤时可以使用只读的
 `uv --version` 一类环境检查。
 
