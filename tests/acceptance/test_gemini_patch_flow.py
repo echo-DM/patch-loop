@@ -982,6 +982,21 @@ def test_repeated_provider_failure_after_edit_preserves_the_provider_error(
     assert "AIzaSySecret" not in str(client.requests)
 
 
+@pytest.mark.parametrize("text_length", [2_000, 4_001])
+def test_completion_preserves_longer_text_up_to_4000_characters(text_length: int) -> None:
+    raw_text = "完" * text_length
+    adapter = GeminiPatchModelAdapter(
+        model_name="gemini-3.5-flash-lite",
+        api_key="test-key",
+        client=FakeGeminiClient([FakeResponse(content=raw_text)]),
+    )
+
+    turn = adapter.next_turn(EvaluationTask(id="task", title="Task", body="Task body"), (), ())
+
+    assert turn.completion is not None
+    assert turn.completion.actionable_message == raw_text[:4_000]
+
+
 def test_plain_text_is_a_stable_completion_without_persisting_raw_context(
     tmp_path: Path,
 ) -> None:

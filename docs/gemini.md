@@ -42,6 +42,8 @@ Gemini receives only the six structured PatchLoop declarations: `list_files`,
 Function calls are proposals; PatchLoop validates names, arguments, paths,
 budgets, and patch policy before executing them. API keys and complete provider
 message history are not written to LangGraph state, logs, artifacts, or reports.
+Completion text is truncated to 4,000 characters before redaction; this does not
+limit provider-generated tokens.
 Provider calls use a timeout of the lesser of 60 seconds and the remaining total
 run time, passed through `PatchModel.next_turn(..., timeout_seconds=...)` to the
 SDK's call-time `timeout`. SDK automatic retries remain disabled. The harness
