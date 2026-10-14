@@ -37,3 +37,18 @@ _Avoid_: Live smoke, production verification
 An explicitly enabled, bounded end-to-end run using a real Gemini credential and
 a dedicated smoke repository. It is release evidence, not part of default CI.
 _Avoid_: Default test suite, offline validation
+
+**Provider retry**:
+Another attempt to obtain a model response for the pending turn within the same
+PatchLoop run. It does not restart the run or repeat completed tool actions.
+_Avoid_: Tool retry, verification iteration, workflow rerun
+
+**Retry waiting time**:
+The cumulative time a run deliberately waits before provider retries. Request
+execution time is separate from waiting time; both contribute to total run time.
+_Avoid_: Request timeout, total run time
+
+**Daily quota exhaustion**:
+A confirmed exhaustion of the provider project's daily allowance. A rate-limit
+error alone does not establish that the daily allowance has been exhausted.
+_Avoid_: Minute rate limit, temporary service overload
